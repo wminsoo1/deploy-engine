@@ -1,0 +1,4 @@
+-- 참고용. deployments / deployment_logs / artifacts / deployment_envs / members
+-- 전부 백엔드팀이 관리하는 실제 RDS(ssafyhub) 스키마이며, 이 서버는 전부 읽기 전용으로
+-- 접근한다(deployments.endpoint_url만 배포 성공 후 갱신). ddl-auto: validate라서
+-- 이 서버가 테이블을 만들거나 바꾸지 않는다. 컬럼명은 각 엔티티 클래스(entity 패키지)를 참고.

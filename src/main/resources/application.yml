@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: deploy-engine
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:platform}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      # deployments/deployment_logs/artifacts/deployment_envs/members는 전부 백엔드팀이
+      # 관리하는 스키마라 여기서 자동으로 생성/변경하면 안 됨. validate로 존재 여부만 확인.
+      ddl-auto: validate
+    show-sql: true
+
+server:
+  port: 8081
+
+# k3s 클러스터 접속 정보. 컨트롤 플레인에서 직접 돌 때는 로컬 kubeconfig
+# (/etc/rancher/k3s/k3s.yaml)를 그대로 쓴다.
+deploy:
+  kubeconfig-path: ${KUBECONFIG_PATH:/etc/deploy-engine/kubeconfig}
+  ssh-key-path: ${SSH_KEY_PATH:/etc/deploy-engine/k3s-key}
+  worker-hosts: ${WORKER_HOSTS:}
+  # 배포 성공 시 deployments.endpoint_url에 채워줄 외부 접근 주소의 베이스
+  # (지금은 E206 Traefik이 물려있는 공인 IP:443)
+  external-base-url: ${EXTERNAL_BASE_URL:http://13.124.149.32:443}
+  # S3 아티팩트 다운로드용 presigned URL 생성 (컨트롤 플레인 IAM 역할로 aws CLI 서명)
+  aws-region: ${AWS_REGION:ap-northeast-2}
+  aws-cli-path: ${AWS_CLI_PATH:/usr/bin/aws}
+  artifact:
+    presign-expiry-seconds: ${ARTIFACT_PRESIGN_EXPIRY_SECONDS:900}
+  # 프론트(정적 빌드 zip)를 서빙할 공개 S3 정적 호스팅 버킷
+  frontend:
+    bucket: ${FRONTEND_BUCKET:ssafy-deploy-frontend}
+  # 백엔드(ssafyhub) SecretEncryptor와 동일한 AES-256 대칭키(Base64 32바이트).
+  # DB 비밀번호/환경변수(v1:...)를 복호화하는 데 쓴다. 미설정 시 암호화 값 만나면 에러.
+  secret-encryption-key: ${SECRET_ENCRYPTION_KEY:}
+  # Prometheus(E206, NetworkPolicy로 컨트롤 플레인 IP만 허용) - CPU/메모리/네트워크/요청수 조회용
+  prometheus-url: ${PROMETHEUS_URL:http://13.124.149.32:30909}
+  # RUNNING 배포들의 CPU/메모리를 주기적으로 deployment_metrics에 적재하는 수집기 설정
+  metrics:
+    collect-interval-ms: ${METRICS_COLLECT_INTERVAL_MS:30000}
+    retention-days: ${METRICS_RETENTION_DAYS:7}
+    cleanup-cron: ${METRICS_CLEANUP_CRON:0 0 4 * * *}
