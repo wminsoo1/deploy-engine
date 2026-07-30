@@ -108,29 +108,21 @@ public class DeploymentProcessor {
                 // 비밀번호는 백엔드가 AES-GCM으로 암호화(v1:)해 저장하므로 복호화해서 실제 값을 쓴다.
                 String dbPassword = secretDecryptor.decrypt(deployment.getDatabasePassword());
                 String dbName = deployment.getDatabaseName();
-                boolean isPostgres = "POSTGRES".equals(databaseEngine);
-                String dbApp = isPostgres ? "postgres" : "mysql";
-                String dbPort = isPostgres ? "5432" : "3306";
-                String dbUsername = isPostgres ? "postgres" : DB_USERNAME;
 
-                // 이 네임스페이스에 DB가 없으면 만들고(도커 컴포즈로 db를 함께 띄우는 것과 비슷),
+                // 이 네임스페이스에 mysql이 없으면 만들고(도커 컴포즈로 db를 함께 띄우는 것과 비슷),
                 // 접속 가능해질 때까지 기다린 뒤 앱을 올려야 앱이 startup에서 DB 연결 실패로 죽지 않는다.
-                log.line(databaseEngine + " 준비 중 (db=" + dbName + ")");
-                if (isPostgres) {
-                    kubernetesDeployService.ensurePostgres(namespace, dbName, dbPassword);
-                } else {
-                    kubernetesDeployService.ensureMysql(namespace, dbName, dbPassword);
-                }
-                boolean dbReady = kubernetesDeployService.waitForRollout(namespace, dbApp, 1, 120);
+                log.line("MySQL 준비 중 (db=" + dbName + ")");
+                kubernetesDeployService.ensureMysql(namespace, dbName, dbPassword);
+                boolean dbReady = kubernetesDeployService.waitForRollout(namespace, "mysql", 1, 120);
                 if (!dbReady) {
-                    throw new IllegalStateException(databaseEngine + "가 제한시간 내에 준비되지 않음");
+                    throw new IllegalStateException("MySQL이 제한시간 내에 준비되지 않음");
                 }
-                log.line(databaseEngine + " 준비 완료");
+                log.line("MySQL 준비 완료");
 
-                env.put("DB_HOST", dbApp);
-                env.put("DB_PORT", dbPort);
+                env.put("DB_HOST", "mysql");
+                env.put("DB_PORT", "3306");
                 env.put("DB_NAME", dbName);
-                env.put("DB_USERNAME", dbUsername);
+                env.put("DB_USERNAME", DB_USERNAME);
                 env.put("DB_PASSWORD", dbPassword);
 
                 // MyBatis 등 자동 테이블 생성이 안 되는 프레임워크를 위한 선택적 DB 초기화 SQL.

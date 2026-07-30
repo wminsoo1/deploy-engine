@@ -300,77 +300,6 @@ public class KubernetesDeployService {
     }
 
     /**
-     * PostgreSQL이 필요한 배포를 위해 네임스페이스에 Postgres를 보장한다 - ensureMysql과 같은 패턴.
-     * "postgres" 계정(비밀번호는 사용자가 입력한 값)으로 databaseName 스키마를 만들어둔다.
-     */
-    public void ensurePostgres(String namespace, String databaseName, String password) throws ApiException {
-        String app = "postgres";
-        try {
-            appsApi.readNamespacedDeployment(app, namespace).execute();
-        } catch (ApiException e) {
-            if (e.getCode() != 404) {
-                throw e;
-            }
-            appsApi.createNamespacedDeployment(namespace,
-                    buildPostgresDeployment(namespace, app, databaseName, password)).execute();
-        }
-
-        V1Service service = new V1Service()
-                .metadata(new V1ObjectMeta().name(app).namespace(namespace))
-                .spec(new V1ServiceSpec()
-                        .selector(Map.of("app", app))
-                        .ports(List.of(new V1ServicePort().port(5432)
-                                .targetPort(new io.kubernetes.client.custom.IntOrString(5432)))));
-        try {
-            coreApi.readNamespacedService(app, namespace).execute();
-        } catch (ApiException e) {
-            if (e.getCode() != 404) {
-                throw e;
-            }
-            coreApi.createNamespacedService(namespace, service).execute();
-        }
-    }
-
-    private V1Deployment buildPostgresDeployment(String namespace, String app, String databaseName, String password) {
-        List<V1EnvVar> env = new java.util.ArrayList<>();
-        env.add(new V1EnvVar().name("POSTGRES_PASSWORD").value(password));
-        if (databaseName != null && !databaseName.isBlank()) {
-            env.add(new V1EnvVar().name("POSTGRES_DB").value(databaseName));
-        }
-
-        // postgres도 mysqld처럼 초기화가 끝나야 5432를 연다 - TCP readiness로 접속 가능 시점을 기다린다.
-        V1Probe readiness = new V1Probe()
-                .tcpSocket(new V1TCPSocketAction().port(new io.kubernetes.client.custom.IntOrString(5432)))
-                .initialDelaySeconds(10).periodSeconds(5).failureThreshold(30);
-
-        V1Container container = new V1Container()
-                .name(app)
-                .image("postgres:16-alpine")
-                .imagePullPolicy("IfNotPresent")
-                .addPortsItem(new V1ContainerPort().containerPort(5432))
-                .env(env)
-                .readinessProbe(readiness)
-                .addVolumeMountsItem(new V1VolumeMount().name("data").mountPath("/var/lib/postgresql/data"))
-                .resources(new V1ResourceRequirements()
-                        .requests(Map.of("memory", new Quantity("512Mi")))
-                        .limits(Map.of("memory", new Quantity("1Gi"))));
-
-        V1PodTemplateSpec template = new V1PodTemplateSpec()
-                .metadata(new V1ObjectMeta().labels(Map.of("app", app)))
-                .spec(new V1PodSpec()
-                        .containers(List.of(container))
-                        .volumes(List.of(new V1Volume().name("data").emptyDir(new V1EmptyDirVolumeSource()))));
-
-        return new V1Deployment()
-                .metadata(new V1ObjectMeta().name(app).namespace(namespace))
-                .spec(new V1DeploymentSpec()
-                        .replicas(1)
-                        .selector(new V1LabelSelector().matchLabels(Map.of("app", app)))
-                        .template(template)
-                        .strategy(new V1DeploymentStrategy().type("Recreate")));
-    }
-
-    /**
      * MongoDB가 필요한 배포를 위해 네임스페이스에 Mongo를 보장한다 - ensureRedis와 같은 패턴.
      * 인증 없이(간단한 개발/데모 용도) "mongo" Service(27017)로 붙게 한다.
      */
@@ -467,16 +396,12 @@ public class KubernetesDeployService {
 
         if (databaseEngine != null) {
             // DB_HOST 환경변수 컨벤션을 안 따르고 localhost로 하드코딩한 앱도 동작하도록,
-            // 같은 Pod 안에서 DB 포트를 리스닝해 실제 DB Service로 그대로 포워딩하는 사이드카.
-            // 같은 Pod의 컨테이너들은 네트워크 네임스페이스를 공유하므로 앱 입장에선 진짜
-            // localhost:포트처럼 보인다. 엔진에 따라 대상 포트/서비스 이름이 다르다.
-            boolean isPostgres = "POSTGRES".equals(databaseEngine);
-            String dbPort = isPostgres ? "5432" : "3306";
-            String dbApp = isPostgres ? "postgres" : "mysql";
+            // 같은 Pod 안에서 3306을 리스닝해 실제 mysql Service(3306)로 그대로 포워딩하는 사이드카.
+            // 같은 Pod의 컨테이너들은 네트워크 네임스페이스를 공유하므로 앱 입장에선 진짜 localhost:3306처럼 보인다.
             V1Container dbProxy = new V1Container()
                     .name("db-proxy")
                     .image("alpine/socat")
-                    .args(List.of("TCP-LISTEN:" + dbPort + ",fork,reuseaddr", "TCP:" + dbApp + ":" + dbPort));
+                    .args(List.of("TCP-LISTEN:3306,fork,reuseaddr", "TCP:mysql:3306"));
             containers.add(dbProxy);
         }
 
@@ -754,13 +679,11 @@ public class KubernetesDeployService {
 
     /**
      * MyBatis 등 자동 테이블 생성이 안 되는 프레임워크를 위해, 사용자가 올린 DB 초기화 SQL 파일을
-     * DB 파드 안에서 한 번 실행한다(kubectl exec -i로 stdin에 SQL을 흘려보냄).
-     * MySQL은 root 비밀번호가 필요하고, Postgres는 파드 안에서 로컬 소켓으로 붙으므로
-     * 공식 이미지의 기본 pg_hba.conf(local trust)상 postgres 계정에 비밀번호가 필요 없다.
+     * DB 파드(mysql) 안에서 한 번 실행한다(kubectl exec -i로 stdin에 SQL을 흘려보냄).
      */
     public String runSchemaSql(String namespace, String engine, String databaseName, String password,
                                 java.nio.file.Path sqlFile) throws IOException, InterruptedException {
-        String app = "POSTGRES".equalsIgnoreCase(engine) ? "postgres" : "mysql";
+        String app = "mysql";
         String podName = runKubectl(namespace, "get", "pods", "-l", "app=" + app,
                 "-o", "jsonpath={.items[0].metadata.name}").trim();
         if (podName.isEmpty()) {
@@ -769,11 +692,7 @@ public class KubernetesDeployService {
 
         List<String> command = new java.util.ArrayList<>(List.of("kubectl", "--kubeconfig", kubeconfigPath,
                 "-n", namespace, "exec", "-i", podName, "--"));
-        if ("POSTGRES".equalsIgnoreCase(engine)) {
-            command.addAll(List.of("psql", "-U", "postgres", "-d", databaseName));
-        } else {
-            command.addAll(List.of("mysql", "-uroot", "-p" + password, databaseName));
-        }
+        command.addAll(List.of("mysql", "-uroot", "-p" + password, databaseName));
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
