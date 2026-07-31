@@ -82,123 +82,155 @@ public class DeploymentProcessor {
             String imageTag = appName + ":" + id;
             String workDir = "/tmp/deploy-" + id;
 
-            log.line("배포 시작 (member=" + namespace + ", slug=" + appName + ")");
+            boolean hasBackend = deployment.getBackendArtifactId() != null;
+            boolean hasFrontend = deployment.getFrontendArtifactId() != null;
+            log.line("배포 시작 (member=" + namespace + ", slug=" + appName
+                    + ", 백엔드=" + hasBackend + ", 프론트=" + hasFrontend + ")");
 
             currentStatus.value = DeploymentStatus.BUILDING;
             log.line("상태 변경: BUILDING");
 
-            Artifact artifact = artifactRepository.findById(deployment.getBackendArtifactId())
-                    .orElseThrow(() -> new IllegalStateException(
-                            "존재하지 않는 backendArtifactId: " + deployment.getBackendArtifactId()));
-            String fileUrl = resolveArtifactDownloadUrl(artifact);
+            if (hasBackend) {
+                Artifact artifact = artifactRepository.findById(deployment.getBackendArtifactId())
+                        .orElseThrow(() -> new IllegalStateException(
+                                "존재하지 않는 backendArtifactId: " + deployment.getBackendArtifactId()));
+                String fileUrl = resolveArtifactDownloadUrl(artifact);
 
-            dockerBuildService.buildImage(workDir, fileUrl, imageTag, deployment.getEffectiveTechStack(),
-                    deployment.getRuntimeVersion(), deployment.getInternalPort(), log);
-            dockerBuildService.transferImage(workDir, imageTag, log);
-            log.line("이미지 빌드/전달 완료: " + imageTag);
+                dockerBuildService.buildImage(workDir, fileUrl, imageTag, deployment.getEffectiveTechStack(),
+                        deployment.getRuntimeVersion(), deployment.getInternalPort(), log);
+                dockerBuildService.transferImage(workDir, imageTag, log);
+                log.line("이미지 빌드/전달 완료: " + imageTag);
+            }
 
             currentStatus.value = DeploymentStatus.DEPLOYING;
             log.line("상태 변경: DEPLOYING");
-            kubernetesDeployService.ensureNamespace(namespace);
-            log.line("네임스페이스 준비: " + namespace);
 
-            Map<String, String> env = new HashMap<>();
-            String databaseEngine = deployment.getEffectiveDatabaseEngine();
-            if (databaseEngine != null) {
-                // 비밀번호는 백엔드가 AES-GCM으로 암호화(v1:)해 저장하므로 복호화해서 실제 값을 쓴다.
-                String dbPassword = secretDecryptor.decrypt(deployment.getDatabasePassword());
-                String dbName = deployment.getDatabaseName();
+            if (hasBackend) {
+                kubernetesDeployService.ensureNamespace(namespace);
+                log.line("네임스페이스 준비: " + namespace);
 
-                // 이 네임스페이스에 mysql이 없으면 만들고(도커 컴포즈로 db를 함께 띄우는 것과 비슷),
-                // 접속 가능해질 때까지 기다린 뒤 앱을 올려야 앱이 startup에서 DB 연결 실패로 죽지 않는다.
-                log.line("MySQL 준비 중 (db=" + dbName + ")");
-                kubernetesDeployService.ensureMysql(namespace, dbName, dbPassword);
-                boolean dbReady = kubernetesDeployService.waitForRollout(namespace, "mysql", 1, 120);
-                if (!dbReady) {
-                    throw new IllegalStateException("MySQL이 제한시간 내에 준비되지 않음");
+                Map<String, String> env = new HashMap<>();
+                String databaseEngine = deployment.getEffectiveDatabaseEngine();
+                if (databaseEngine != null) {
+                    // 비밀번호는 백엔드가 AES-GCM으로 암호화(v1:)해 저장하므로 복호화해서 실제 값을 쓴다.
+                    String dbPassword = secretDecryptor.decrypt(deployment.getDatabasePassword());
+                    String dbName = deployment.getDatabaseName();
+
+                    // 이 네임스페이스에 mysql이 없으면 만들고(도커 컴포즈로 db를 함께 띄우는 것과 비슷),
+                    // 접속 가능해질 때까지 기다린 뒤 앱을 올려야 앱이 startup에서 DB 연결 실패로 죽지 않는다.
+                    log.line("MySQL 준비 중 (db=" + dbName + ")");
+                    kubernetesDeployService.ensureMysql(namespace, dbName, dbPassword);
+                    boolean dbReady = kubernetesDeployService.waitForRollout(namespace, "mysql", 1, 120);
+                    if (!dbReady) {
+                        throw new IllegalStateException("MySQL이 제한시간 내에 준비되지 않음");
+                    }
+                    log.line("MySQL 준비 완료");
+
+                    env.put("DB_HOST", "mysql");
+                    env.put("DB_PORT", "3306");
+                    env.put("DB_NAME", dbName);
+                    env.put("DB_USERNAME", DB_USERNAME);
+                    env.put("DB_PASSWORD", dbPassword);
+
+                    // MyBatis 등 자동 테이블 생성이 안 되는 프레임워크를 위한 선택적 DB 초기화 SQL.
+                    if (deployment.getSchemaArtifactId() != null) {
+                        log.line("DB 초기화 SQL 실행 중");
+                        Artifact schemaArtifact = artifactRepository.findById(deployment.getSchemaArtifactId())
+                                .orElseThrow(() -> new IllegalStateException(
+                                        "존재하지 않는 schemaArtifactId: " + deployment.getSchemaArtifactId()));
+                        String schemaFileUrl = resolveArtifactDownloadUrl(schemaArtifact);
+                        java.nio.file.Path schemaFile = java.nio.file.Path.of(workDir, "schema.sql");
+                        java.nio.file.Files.createDirectories(java.nio.file.Path.of(workDir));
+                        dockerBuildService.downloadFile(schemaFileUrl, schemaFile);
+                        kubernetesDeployService.runSchemaSql(namespace, databaseEngine, dbName, dbPassword, schemaFile);
+                        log.line("DB 초기화 SQL 실행 완료");
+                    }
                 }
-                log.line("MySQL 준비 완료");
 
-                env.put("DB_HOST", "mysql");
-                env.put("DB_PORT", "3306");
-                env.put("DB_NAME", dbName);
-                env.put("DB_USERNAME", DB_USERNAME);
-                env.put("DB_PASSWORD", dbPassword);
-
-                // MyBatis 등 자동 테이블 생성이 안 되는 프레임워크를 위한 선택적 DB 초기화 SQL.
-                if (deployment.getSchemaArtifactId() != null) {
-                    log.line("DB 초기화 SQL 실행 중");
-                    Artifact schemaArtifact = artifactRepository.findById(deployment.getSchemaArtifactId())
-                            .orElseThrow(() -> new IllegalStateException(
-                                    "존재하지 않는 schemaArtifactId: " + deployment.getSchemaArtifactId()));
-                    String schemaFileUrl = resolveArtifactDownloadUrl(schemaArtifact);
-                    java.nio.file.Path schemaFile = java.nio.file.Path.of(workDir, "schema.sql");
-                    java.nio.file.Files.createDirectories(java.nio.file.Path.of(workDir));
-                    dockerBuildService.downloadFile(schemaFileUrl, schemaFile);
-                    kubernetesDeployService.runSchemaSql(namespace, databaseEngine, dbName, dbPassword, schemaFile);
-                    log.line("DB 초기화 SQL 실행 완료");
+                if (deployment.getNeededServices().contains("REDIS")) {
+                    log.line("Redis 준비 중");
+                    kubernetesDeployService.ensureRedis(namespace);
+                    boolean redisReady = kubernetesDeployService.waitForRollout(namespace, "redis", 1, 60);
+                    if (!redisReady) {
+                        throw new IllegalStateException("Redis가 제한시간 내에 준비되지 않음");
+                    }
+                    log.line("Redis 준비 완료");
+                    env.put("REDIS_HOST", "redis");
+                    env.put("REDIS_PORT", "6379");
                 }
+
+                if (deployment.getNeededServices().contains("MONGODB")) {
+                    log.line("MongoDB 준비 중");
+                    kubernetesDeployService.ensureMongo(namespace);
+                    boolean mongoReady = kubernetesDeployService.waitForRollout(namespace, "mongo", 1, 60);
+                    if (!mongoReady) {
+                        throw new IllegalStateException("MongoDB가 제한시간 내에 준비되지 않음");
+                    }
+                    log.line("MongoDB 준비 완료");
+                    env.put("MONGO_HOST", "mongo");
+                    env.put("MONGO_PORT", "27017");
+                }
+
+                for (DeploymentEnv e : deploymentEnvRepository.findByDeploymentId(id)) {
+                    // 환경변수 값도 암호화(v1:)돼 저장되므로 복호화해서 주입한다.
+                    env.put(e.getEnvKey(), secretDecryptor.decrypt(e.getValue()));
+                }
+
+                kubernetesDeployService.applyDeployment(namespace, appName, imageTag,
+                        deployment.getInternalPort(), DEFAULT_REPLICAS, DEFAULT_MEMORY_LIMIT, env,
+                        databaseEngine);
+                kubernetesDeployService.applyService(namespace, appName, deployment.getInternalPort());
+                kubernetesDeployService.applyIngress(namespace, appName, deployment.getInternalPort());
+                log.line("Deployment/Service/Ingress 적용 완료 (/" + namespace + "/" + appName + ")");
+
+                // 메인 서버(SubdomainProxyFilter)를 거치지 않고 Traefik에서 바로 이 배포로 가는
+                // Host 기반 라우트도 함께 만들어둔다. DNS가 아직 메인 서버를 가리키는 동안은
+                // 안 쓰이는 경로라 기존 트래픽에 영향 없음 - DNS 전환 전 미리 준비해두는 것.
+                if (hasFrontend) {
+                    kubernetesDeployService.ensureFrontendExternalService(namespace);
+                }
+                kubernetesDeployService.applyHostRoute(namespace, appName, deployment.getInternalPort(), hasFrontend);
+                log.line("Host 기반 라우트 적용 완료 (slug=" + appName + ", 분리형여부=" + hasFrontend + ")");
             }
 
-            if (deployment.getNeededServices().contains("REDIS")) {
-                log.line("Redis 준비 중");
-                kubernetesDeployService.ensureRedis(namespace);
-                boolean redisReady = kubernetesDeployService.waitForRollout(namespace, "redis", 1, 60);
-                if (!redisReady) {
-                    throw new IllegalStateException("Redis가 제한시간 내에 준비되지 않음");
-                }
-                log.line("Redis 준비 완료");
-                env.put("REDIS_HOST", "redis");
-                env.put("REDIS_PORT", "6379");
-            }
-
-            if (deployment.getNeededServices().contains("MONGODB")) {
-                log.line("MongoDB 준비 중");
-                kubernetesDeployService.ensureMongo(namespace);
-                boolean mongoReady = kubernetesDeployService.waitForRollout(namespace, "mongo", 1, 60);
-                if (!mongoReady) {
-                    throw new IllegalStateException("MongoDB가 제한시간 내에 준비되지 않음");
-                }
-                log.line("MongoDB 준비 완료");
-                env.put("MONGO_HOST", "mongo");
-                env.put("MONGO_PORT", "27017");
-            }
-
-            for (DeploymentEnv e : deploymentEnvRepository.findByDeploymentId(id)) {
-                // 환경변수 값도 암호화(v1:)돼 저장되므로 복호화해서 주입한다.
-                env.put(e.getEnvKey(), secretDecryptor.decrypt(e.getValue()));
-            }
-
-            kubernetesDeployService.applyDeployment(namespace, appName, imageTag,
-                    deployment.getInternalPort(), DEFAULT_REPLICAS, DEFAULT_MEMORY_LIMIT, env,
-                    databaseEngine);
-            kubernetesDeployService.applyService(namespace, appName, deployment.getInternalPort());
-            kubernetesDeployService.applyIngress(namespace, appName, deployment.getInternalPort());
-            log.line("Deployment/Service/Ingress 적용 완료 (/" + namespace + "/" + appName + ")");
-
-            // 프론트(정적 빌드 zip)를 S3 정적 호스팅으로 배포. best-effort - 실패해도 백엔드 배포는 계속 진행.
-            if (deployment.getFrontendArtifactId() != null) {
+            // 프론트 배포. 백엔드가 있으면 best-effort(실패해도 백엔드는 계속 진행) - 백엔드가
+            // 없는(프론트만) 배포는 이게 배포의 전부라 실패하면 이 배포 자체가 실패한 것이다.
+            if (hasFrontend) {
                 try {
                     Artifact frontendArtifact = artifactRepository.findById(deployment.getFrontendArtifactId())
                             .orElseThrow(() -> new IllegalStateException(
                                     "존재하지 않는 frontendArtifactId: " + deployment.getFrontendArtifactId()));
-                    frontendDeployService.deployFrontend(
-                            frontendArtifact.getBucket(), frontendArtifact.getObjectKey(), appName, log);
+                    if (deployment.isFrontendPrebuilt()) {
+                        frontendDeployService.deployFrontend(
+                                frontendArtifact.getBucket(), frontendArtifact.getObjectKey(), appName, log);
+                    } else {
+                        String frontendFileUrl = resolveArtifactDownloadUrl(frontendArtifact);
+                        frontendDeployService.buildAndDeployFrontend(frontendFileUrl, appName,
+                                deployment.getFrontendRuntimeVersion(), log);
+                    }
                 } catch (Exception fe) {
-                    log.line("프론트 배포 실패(백엔드는 계속 진행): ["
+                    log.line("프론트 배포 실패" + (hasBackend ? "(백엔드는 계속 진행): [" : ": [")
                             + fe.getClass().getSimpleName() + "] " + fe.getMessage());
+                    if (!hasBackend) {
+                        throw fe;
+                    }
                 }
             }
 
-            boolean ready = kubernetesDeployService.waitForRollout(namespace, appName, DEFAULT_REPLICAS, 180);
+            boolean ready = !hasBackend || kubernetesDeployService.waitForRollout(namespace, appName, DEFAULT_REPLICAS, 180);
 
             if (ready) {
-                log.line("모든 replica Ready 확인됨");
-                String endpointUrl = externalBaseUrl + "/" + namespace + "/" + appName;
-                deployment.setEndpointUrl(endpointUrl);
-                deploymentRepository.save(deployment);
-                currentStatus.value = DeploymentStatus.RUNNING;
-                log.line("상태 변경: RUNNING (endpoint=" + endpointUrl + ")");
+                log.line(hasBackend ? "모든 replica Ready 확인됨" : "프론트 배포 완료");
+                if (hasBackend) {
+                    String endpointUrl = externalBaseUrl + "/" + namespace + "/" + appName;
+                    deployment.setEndpointUrl(endpointUrl);
+                    deploymentRepository.save(deployment);
+                    currentStatus.value = DeploymentStatus.RUNNING;
+                    log.line("상태 변경: RUNNING (endpoint=" + endpointUrl + ")");
+                } else {
+                    currentStatus.value = DeploymentStatus.RUNNING;
+                    log.line("상태 변경: RUNNING (프론트만 배포 - S3 정적 호스팅)");
+                }
             } else {
                 log.line("제한시간 내에 Ready 상태가 되지 않음 - 실패한 컨테이너의 최근 로그:");
                 String diagnostics = kubernetesDeployService.getPodFailureLogs(namespace, appName);

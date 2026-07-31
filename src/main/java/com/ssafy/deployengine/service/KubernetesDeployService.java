@@ -63,6 +63,16 @@ public class KubernetesDeployService {
     @Value("${deploy.kubeconfig-path}")
     private String kubeconfigPath;
 
+    // 서브도메인 Host 기반 라우팅(applyHostRoute)에 쓰는 공개 도메인 - {slug}.{publicDomain}
+    @Value("${deploy.public-domain:ssafyhub.site}")
+    private String publicDomain;
+
+    @Value("${deploy.frontend.bucket:ssafy-deploy-frontend}")
+    private String frontendBucket;
+
+    @Value("${deploy.aws-region:ap-northeast-2}")
+    private String awsRegion;
+
     private CoreV1Api coreApi;
     private AppsV1Api appsApi;
     private NetworkingV1Api networkingApi;
@@ -459,11 +469,19 @@ public class KubernetesDeployService {
      */
     public void deleteAppResources(String namespace, String appName) throws ApiException {
         String middlewareName = appName + "-strip-prefix";
+        String addPrefixName = appName + "-add-slug";
+        String hostRouteName = appName + "-host";
         deleteIfExists(() -> appsApi.deleteNamespacedDeployment(appName, namespace).execute());
         deleteIfExists(() -> coreApi.deleteNamespacedService(appName, namespace).execute());
         deleteIfExists(() -> networkingApi.deleteNamespacedIngress(appName, namespace).execute());
         deleteIfExists(() -> customObjectsApi.deleteNamespacedCustomObject(
                 "traefik.io", "v1alpha1", namespace, "middlewares", middlewareName).execute());
+        deleteIfExists(() -> customObjectsApi.deleteNamespacedCustomObject(
+                "traefik.io", "v1alpha1", namespace, "ingressroutes", hostRouteName).execute());
+        deleteIfExists(() -> customObjectsApi.deleteNamespacedCustomObject(
+                "traefik.io", "v1alpha1", namespace, "middlewares", addPrefixName).execute());
+        // frontend-s3(ExternalName Service)와 frontend-s3-host-rewrite(Middleware)는 네임스페이스
+        // 공용 리소스라(mysql/redis/mongo와 같은 취급) 여기서 안 지운다.
     }
 
     @FunctionalInterface
@@ -533,6 +551,165 @@ public class KubernetesDeployService {
             } else {
                 throw e;
             }
+        }
+    }
+
+    /**
+     * {slug}.{publicDomain}로 들어온 요청이 메인 서버(SubdomainProxyFilter)를 거치지 않고
+     * Traefik에서 바로 이 배포의 Service로 가도록 Host 기반 IngressRoute를 만든다.
+     * applyIngress(경로 기반, 메인 서버 프록시용)와 별개로 존재 - 메인 서버 경유 방식을 당장
+     * 걷어내지 않고 두 경로를 병행하기 위함(DNS를 Traefik으로 돌리기 전까진 이 라우트는 안 쓰인다).
+     *
+     * - 통합형(hasFrontend=false): 전부 이 앱의 Service로 (경로 유지, 벗겨낼 접두사 없음)
+     * - 분리형(hasFrontend=true): "/api"로 시작하면 이 앱의 Service로(경로 그대로 전달 -
+     *   메인 서버 프록시와 달리 "/api"를 벗기지 않는다. 이 배포 데모들도 전부 "/api/..."
+     *   경로로 직접 구현돼 있어, 벗기지 않는 쪽이 실제 앱 구현과 맞는다), 그 외 전부
+     *   공용 S3 정적 호스팅으로 - 단, S3의 실제 객체 위치가 "{slug}/..."라서 addPrefix로
+     *   "/{slug}"를 앞에 붙여준 뒤에 보내야 한다.
+     */
+    public void applyHostRoute(String namespace, String appName, int port, boolean hasFrontend) throws ApiException {
+        String host = appName + "." + publicDomain;
+        String routeName = appName + "-host";
+
+        List<Map<String, Object>> routes = new java.util.ArrayList<>();
+        Map<String, Object> appService = Map.of("name", appName, "port", port, "kind", "Service");
+
+        if (!hasFrontend) {
+            routes.add(Map.of(
+                    "kind", "Rule",
+                    "match", "Host(`" + host + "`)",
+                    "services", List.of(appService)));
+        } else {
+            String addPrefixName = appName + "-add-slug";
+            applyAddPrefixMiddleware(namespace, addPrefixName, "/" + appName);
+            // S3 정적 웹사이트 호스팅은 Host 헤더로 버킷을 구분하는 가상 호스팅 방식이라,
+            // 브라우저가 보낸 원래 Host({slug}.{publicDomain})를 그대로 넘기면 "그 이름의
+            // 버킷"을 찾다가 NoSuchBucket이 난다. S3 엔드포인트 자신의 호스트명으로 덮어써야 한다.
+            String hostRewriteName = "frontend-s3-host-rewrite";
+            applyHostRewriteMiddleware(namespace, hostRewriteName,
+                    frontendBucket + ".s3-website." + awsRegion + ".amazonaws.com");
+
+            routes.add(Map.of(
+                    "kind", "Rule",
+                    "match", "Host(`" + host + "`) && PathPrefix(`/api`)",
+                    "priority", 10,
+                    "services", List.of(appService)));
+
+            Map<String, Object> frontendService = Map.of("name", "frontend-s3", "port", 80, "kind", "Service");
+            routes.add(Map.of(
+                    "kind", "Rule",
+                    "match", "Host(`" + host + "`)",
+                    "priority", 1,
+                    "middlewares", List.of(Map.of("name", hostRewriteName), Map.of("name", addPrefixName)),
+                    "services", List.of(frontendService)));
+        }
+
+        applyIngressRoute(namespace, routeName, routes);
+    }
+
+    private void applyIngressRoute(String namespace, String name, List<Map<String, Object>> routes)
+            throws ApiException {
+        Map<String, Object> metadata = new java.util.HashMap<>(Map.of("name", name, "namespace", namespace));
+        Map<String, Object> spec = Map.of("entryPoints", List.of("web", "websecure"), "routes", routes);
+        try {
+            Object existing = customObjectsApi.getNamespacedCustomObject(
+                    "traefik.io", "v1alpha1", namespace, "ingressroutes", name).execute();
+            String resourceVersion = extractResourceVersion(existing);
+            if (resourceVersion != null) {
+                metadata.put("resourceVersion", resourceVersion);
+            }
+            Map<String, Object> ingressRoute = Map.of(
+                    "apiVersion", "traefik.io/v1alpha1", "kind", "IngressRoute", "metadata", metadata, "spec", spec);
+            customObjectsApi.replaceNamespacedCustomObject(
+                    "traefik.io", "v1alpha1", namespace, "ingressroutes", name, ingressRoute).execute();
+        } catch (ApiException e) {
+            if (e.getCode() == 404) {
+                Map<String, Object> ingressRoute = Map.of(
+                        "apiVersion", "traefik.io/v1alpha1", "kind", "IngressRoute",
+                        "metadata", metadata, "spec", spec);
+                customObjectsApi.createNamespacedCustomObject(
+                        "traefik.io", "v1alpha1", namespace, "ingressroutes", ingressRoute).execute();
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    private void applyHostRewriteMiddleware(String namespace, String name, String rewriteHost) throws ApiException {
+        Map<String, Object> metadata = new java.util.HashMap<>(Map.of("name", name, "namespace", namespace));
+        Map<String, Object> spec = Map.of("headers", Map.of("customRequestHeaders", Map.of("Host", rewriteHost)));
+        try {
+            Object existing = customObjectsApi.getNamespacedCustomObject(
+                    "traefik.io", "v1alpha1", namespace, "middlewares", name).execute();
+            String resourceVersion = extractResourceVersion(existing);
+            if (resourceVersion != null) {
+                metadata.put("resourceVersion", resourceVersion);
+            }
+            Map<String, Object> middleware = Map.of(
+                    "apiVersion", "traefik.io/v1alpha1", "kind", "Middleware", "metadata", metadata, "spec", spec);
+            customObjectsApi.replaceNamespacedCustomObject(
+                    "traefik.io", "v1alpha1", namespace, "middlewares", name, middleware).execute();
+        } catch (ApiException e) {
+            if (e.getCode() == 404) {
+                Map<String, Object> middleware = Map.of(
+                        "apiVersion", "traefik.io/v1alpha1", "kind", "Middleware",
+                        "metadata", metadata, "spec", spec);
+                customObjectsApi.createNamespacedCustomObject(
+                        "traefik.io", "v1alpha1", namespace, "middlewares", middleware).execute();
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    private void applyAddPrefixMiddleware(String namespace, String name, String prefix) throws ApiException {
+        Map<String, Object> metadata = new java.util.HashMap<>(Map.of("name", name, "namespace", namespace));
+        Map<String, Object> spec = Map.of("addPrefix", Map.of("prefix", prefix));
+        try {
+            Object existing = customObjectsApi.getNamespacedCustomObject(
+                    "traefik.io", "v1alpha1", namespace, "middlewares", name).execute();
+            String resourceVersion = extractResourceVersion(existing);
+            if (resourceVersion != null) {
+                metadata.put("resourceVersion", resourceVersion);
+            }
+            Map<String, Object> middleware = Map.of(
+                    "apiVersion", "traefik.io/v1alpha1", "kind", "Middleware", "metadata", metadata, "spec", spec);
+            customObjectsApi.replaceNamespacedCustomObject(
+                    "traefik.io", "v1alpha1", namespace, "middlewares", name, middleware).execute();
+        } catch (ApiException e) {
+            if (e.getCode() == 404) {
+                Map<String, Object> middleware = Map.of(
+                        "apiVersion", "traefik.io/v1alpha1", "kind", "Middleware",
+                        "metadata", metadata, "spec", spec);
+                customObjectsApi.createNamespacedCustomObject(
+                        "traefik.io", "v1alpha1", namespace, "middlewares", middleware).execute();
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    /**
+     * 팀 네임스페이스마다 하나만 있으면 되는 공용 리소스 - S3 정적 호스팅(공용 버킷)을 가리키는
+     * ExternalName Service. 프론트 버킷은 모든 배포가 공유하고 slug만 객체 키 접두사로 다르므로,
+     * 버킷 하나당 Service 하나면 충분하다(멱등 - 이미 있으면 그대로 둔다).
+     */
+    public void ensureFrontendExternalService(String namespace) throws ApiException {
+        String name = "frontend-s3";
+        try {
+            coreApi.readNamespacedService(name, namespace).execute();
+        } catch (ApiException e) {
+            if (e.getCode() != 404) {
+                throw e;
+            }
+            V1Service service = new V1Service()
+                    .metadata(new V1ObjectMeta().name(name).namespace(namespace))
+                    .spec(new V1ServiceSpec()
+                            .type("ExternalName")
+                            .externalName(frontendBucket + ".s3-website." + awsRegion + ".amazonaws.com")
+                            .ports(List.of(new V1ServicePort().port(80)
+                                    .targetPort(new io.kubernetes.client.custom.IntOrString(80)))));
+            coreApi.createNamespacedService(namespace, service).execute();
         }
     }
 

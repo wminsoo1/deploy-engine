@@ -17,10 +17,12 @@ import org.springframework.stereotype.Service;
 import com.ssafy.deployengine.service.DockerBuildService.LogSink;
 
 /**
- * 프론트엔드(.zip 정적 빌드 결과물)를 S3 정적 호스팅으로 배포한다.
- * S3 아티팩트(zip) 다운로드 → 안전 압축해제 → 공개 버킷(ssafy-deploy-frontend)의 {slug}/ 로 업로드.
- * 다운/해제/업로드가 전부 컨트롤 플레인에서 돌고, 이 서버 IAM 역할이 GetObject/PutObject 권한을 가지므로
- * aws CLI를 직접 사용한다(백엔드처럼 Docker로 빌드할 필요가 없다 - 사용자가 이미 빌드해서 올린 정적 파일).
+ * 프론트엔드를 S3 정적 호스팅으로 배포한다. 두 갈래가 있다:
+ *  - PLAIN(이미 빌드된 정적 zip): S3 아티팩트 다운로드 → 안전 압축해제 → 업로드. Docker 불필요
+ *    (사용자가 이미 빌드해서 올린 정적 파일이라 aws CLI만으로 충분).
+ *  - REACT/VUE/ANGULAR/SVELTE(소스 zip): DockerBuildService로 빌드만 컨테이너에서 수행해
+ *    정적 산출물만 뽑아온 뒤, 그 결과를 PLAIN과 동일한 방식으로 업로드한다.
+ * 어느 쪽이든 최종 업로드 대상(webRoot)만 찾으면 그 뒤는 완전히 같아서 uploadWebRoot()로 공용화했다.
  */
 @Service
 public class FrontendDeployService {
@@ -38,7 +40,13 @@ public class FrontendDeployService {
     @Value("${deploy.frontend.bucket:ssafy-deploy-frontend}")
     private String frontendBucket;
 
-    /** 프론트 zip을 배포하고 접속용 정적 웹 URL을 반환한다. */
+    private final DockerBuildService dockerBuildService;
+
+    public FrontendDeployService(DockerBuildService dockerBuildService) {
+        this.dockerBuildService = dockerBuildService;
+    }
+
+    /** PLAIN: 이미 빌드된 정적 zip을 그대로 올린다. */
     public String deployFrontend(String artifactBucket, String objectKey, String slug, LogSink log)
             throws IOException, InterruptedException {
         Path work = Files.createTempDirectory("frontend-" + slug + "-");
@@ -52,38 +60,61 @@ public class FrontendDeployService {
             log.line("압축 해제 중...");
             unzip(zipPath, extractDir);
 
-            // index.html이 zip 루트가 아니라 한 겹 폴더(예: dist/) 안에 있는 흔한 경우를 보정한다.
             Path webRoot = resolveWebRoot(extractDir);
-
-            // cp --recursive는 로컬 파일을 PutObject로 올리기만 하므로 PutObject 권한만 있으면 된다.
-            // (sync는 대상 비교에 ListBucket, --delete엔 DeleteObject가 필요해 권한을 더 요구한다.)
-            // 대신 이전 배포의 orphan 파일은 남는다(index.html이 최신 자산을 가리키므로 동작엔 무해).
-            log.line("S3 정적 호스팅으로 업로드: s3://" + frontendBucket + "/" + slug + "/");
-            runAws(log, "s3", "cp", webRoot.toString(), "s3://" + frontendBucket + "/" + slug + "/",
-                    "--recursive", "--region", region, "--only-show-errors");
-
-            String url = "http://" + frontendBucket + ".s3-website." + region + ".amazonaws.com/" + slug + "/";
-            log.line("프론트 배포 완료: " + url);
-            return url;
+            return uploadWebRoot(webRoot, slug, log);
         } finally {
             deleteRecursively(work);
         }
     }
 
-    /** zip 루트에 index.html이 있으면 그대로, 없고 유일한 하위 폴더에 있으면 그 폴더를 웹 루트로 쓴다. */
-    private Path resolveWebRoot(Path extractDir) throws IOException {
-        if (Files.exists(extractDir.resolve("index.html"))) {
-            return extractDir;
+    /**
+     * REACT/VUE/ANGULAR/SVELTE: 소스 zip을 DockerBuildService로 빌드해 정적 산출물만
+     * 뽑아온 뒤 업로드한다. fileUrl은 백엔드 아티팩트와 동일하게 presigned URL을 쓴다
+     * (buildStaticSite가 빌드 호스트로 컨텍스트를 옮기는 방식이 백엔드 소스 빌드와 같기 때문).
+     */
+    public String buildAndDeployFrontend(String fileUrl, String slug, String runtimeVersion, LogSink log)
+            throws Exception {
+        String workDir = "/tmp/frontend-build-" + slug + "-" + System.nanoTime();
+        Path builtDir = dockerBuildService.buildStaticSite(workDir, fileUrl,
+                "frontend-" + slug + ":build", runtimeVersion, log);
+        try {
+            Path webRoot = resolveWebRoot(builtDir);
+            return uploadWebRoot(webRoot, slug, log);
+        } finally {
+            deleteRecursively(Path.of(workDir));
         }
-        try (var stream = Files.list(extractDir)) {
+    }
+
+    private String uploadWebRoot(Path webRoot, String slug, LogSink log) throws IOException, InterruptedException {
+        // cp --recursive는 로컬 파일을 PutObject로 올리기만 하므로 PutObject 권한만 있으면 된다.
+        // (sync는 대상 비교에 ListBucket, --delete엔 DeleteObject가 필요해 권한을 더 요구한다.)
+        // 대신 이전 배포의 orphan 파일은 남는다(index.html이 최신 자산을 가리키므로 동작엔 무해).
+        log.line("S3 정적 호스팅으로 업로드: s3://" + frontendBucket + "/" + slug + "/");
+        runAws(log, "s3", "cp", webRoot.toString(), "s3://" + frontendBucket + "/" + slug + "/",
+                "--recursive", "--region", region, "--only-show-errors");
+
+        String url = "http://" + frontendBucket + ".s3-website." + region + ".amazonaws.com/" + slug + "/";
+        log.line("프론트 배포 완료: " + url);
+        return url;
+    }
+
+    /**
+     * index.html을 찾을 때까지 "하위 폴더가 딱 하나뿐인" 경우를 계속 따라 내려간다.
+     * Angular는 dist/{프로젝트명}/browser/처럼 두 겹 들어가는 경우가 있어 한 겹만 보던
+     * 기존 로직으론 부족해서 재귀로 확장했다(React/Vue/Svelte는 보통 0~1겹이라 그대로 통과).
+     */
+    private Path resolveWebRoot(Path dir) throws IOException {
+        if (Files.exists(dir.resolve("index.html"))) {
+            return dir;
+        }
+        try (var stream = Files.list(dir)) {
             List<Path> entries = stream.toList();
-            if (entries.size() == 1 && Files.isDirectory(entries.get(0))
-                    && Files.exists(entries.get(0).resolve("index.html"))) {
-                return entries.get(0);
+            if (entries.size() == 1 && Files.isDirectory(entries.get(0))) {
+                return resolveWebRoot(entries.get(0));
             }
         }
-        // 못 찾으면 그대로 둔다(업로드는 되지만 index.html 위치는 zip 구성에 따름).
-        return extractDir;
+        // 못 찾으면 그대로 둔다(업로드는 되지만 index.html 위치는 산출물 구성에 따름).
+        return dir;
     }
 
     private void unzip(Path zip, Path targetDir) throws IOException {

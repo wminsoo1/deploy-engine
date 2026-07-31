@@ -163,6 +163,76 @@ public class DockerBuildService {
         return extractDir;
     }
 
+    /**
+     * React/Vue/Angular/Svelte 프론트 소스(zip)를 받아, 빌드만 컨테이너 안에서 수행하고
+     * 정적 산출물(HTML/JS/CSS)만 로컬로 뽑아온다 - 앱처럼 계속 떠 있는 컨테이너가 아니라
+     * S3 정적 호스팅에 올릴 파일 묶음이 목적이라 buildImage()와는 결과물의 성격이 다르다.
+     * 네 프레임워크 전부 "npm install && npm run build" 관례를 그대로 따르고 dist/ 아래로
+     * 결과물을 내므로(Angular는 dist/{프로젝트명}/ 처럼 한 겹 더 들어갈 뿐) Dockerfile은 공통이다.
+     * 반환값은 정적 산출물이 담긴 로컬 디렉터리 - 호출하는 쪽(FrontendDeployService)이
+     * index.html 위치를 찾아 S3에 업로드한다.
+     */
+    public Path buildStaticSite(String workDir, String fileUrl, String imageTag, String runtimeVersion,
+                                 LogSink log) throws Exception {
+        String host = buildHost();
+        String remoteDir = "/tmp/" + Path.of(workDir).getFileName();
+        Path localDir = Path.of(workDir);
+        Files.createDirectories(localDir);
+
+        Path zipPath = localDir.resolve("frontend-source.zip");
+        download(fileUrl, zipPath);
+        log.line("프론트 소스(zip) 다운로드 완료: " + fileUrl);
+
+        Path extractDir = Files.createDirectories(localDir.resolve("ctx"));
+        unzip(zipPath, extractDir);
+        Path contextRoot = resolveSourceRoot(extractDir);
+
+        Files.writeString(contextRoot.resolve("Dockerfile"), frontendBuildDockerfile(runtimeVersion));
+        log.line("프론트 빌드용 Dockerfile 생성 완료");
+
+        runAndStream(log, null, "chmod", "-R", "+x", contextRoot.toString());
+
+        ssh(log, host, "rm -rf " + remoteDir);
+        runAndStream(log, null, "scp", "-r", "-i", sshKeyPath, "-o", "StrictHostKeyChecking=no",
+                contextRoot.toString(), "ubuntu@" + host + ":" + remoteDir);
+        ssh(log, host, "sudo docker build -t " + imageTag + " " + remoteDir);
+        log.line("프론트 빌드 완료: " + imageTag);
+
+        // 빌드용 이미지를 실제로 실행하지 않고, docker create(컨테이너를 시작하지 않고 만들기만
+        // 함)로 파일 시스템만 얻어서 docker cp로 결과물만 뽑아낸다. 그 뒤 컨테이너/이미지는
+        // 정리해서 빌드 호스트에 계속 쌓이지 않게 한다.
+        String containerName = imageTag.replace(":", "-").replace("/", "-") + "-extract";
+        String remoteExtractDir = "/tmp/" + containerName;
+        ssh(log, host, "sudo docker rm -f " + containerName + " >/dev/null 2>&1; "
+                + "sudo docker create --name " + containerName + " " + imageTag + " && "
+                + "sudo rm -rf " + remoteExtractDir + " && "
+                + "sudo docker cp " + containerName + ":/output " + remoteExtractDir + " && "
+                + "sudo docker rm " + containerName + " && sudo docker rmi " + imageTag);
+
+        Path localOutputParent = localDir.resolve("built");
+        Files.createDirectories(localOutputParent);
+        runAndStream(log, null, "scp", "-r", "-i", sshKeyPath, "-o", "StrictHostKeyChecking=no",
+                "ubuntu@" + host + ":" + remoteExtractDir, localOutputParent.toString());
+        ssh(log, host, "sudo rm -rf " + remoteExtractDir + " " + remoteDir);
+        log.line("정적 빌드 결과물 추출 완료");
+
+        return localOutputParent.resolve(containerName);
+    }
+
+    private String frontendBuildDockerfile(String runtimeVersion) {
+        String version = (runtimeVersion == null || runtimeVersion.isBlank()) ? "20" : runtimeVersion.trim();
+        return """
+                FROM node:%s-alpine AS build
+                WORKDIR /app
+                COPY . .
+                RUN npm install && npm run build
+
+                FROM alpine:3.20
+                COPY --from=build /app/dist /output
+                CMD ["true"]
+                """.formatted(version);
+    }
+
     /** presigned URL에서 파일을 로컬로 내려받는다 - DB 초기화 SQL처럼 이미지 빌드와 무관한 다운로드에도 재사용. */
     public void downloadFile(String fileUrl, Path target) {
         download(fileUrl, target);
