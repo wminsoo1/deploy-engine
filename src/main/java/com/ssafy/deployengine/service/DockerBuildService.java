@@ -19,7 +19,7 @@ import org.springframework.stereotype.Service;
  * 아티팩트를 컨테이너 이미지로 빌드해 각 워커(현재 E206)에 전달한다. 사용자는 Dockerfile을
  * 올리지 않는다 - 선택한 스택(언어+프레임워크)에 맞춰 플랫폼이 표준 Dockerfile을 자동 생성한다:
  *  - SPRING_JPA / SPRING_MYBATIS : .jar 산출물 하나 → 표준 Java 실행 Dockerfile
- *  - DJANGO / EXPRESS            : 소스 zip(의존성 명세 포함) → 표준 Python/Node 빌드 Dockerfile
+ *  - DJANGO / FASTAPI / EXPRESS  : 소스 zip(의존성 명세 포함) → 표준 Python/Node 빌드 Dockerfile
  * 실제 docker build는 컨트롤 플레인(t3.small)이 아니라 빌드 호스트(E206)에서 SSH로 원격 수행한다.
  */
 @Service
@@ -46,7 +46,7 @@ public class DockerBuildService {
         Path localDir = Path.of(workDir);
         Files.createDirectories(localDir);
 
-        if ("DJANGO".equals(stack) || "EXPRESS".equals(stack)) {
+        if ("DJANGO".equals(stack) || "FASTAPI".equals(stack) || "EXPRESS".equals(stack)) {
             buildFromSourceZip(host, remoteDir, localDir, fileUrl, imageTag, stack, runtimeVersion, internalPort, log);
         } else {
             buildFromJar(host, remoteDir, localDir, fileUrl, imageTag, runtimeVersion, log);
@@ -92,9 +92,14 @@ public class DockerBuildService {
 
         // 프로젝트 전체가 zip 루트가 아니라 한 겹 폴더(예: 프로젝트명/) 안에 있는 흔한 경우 보정.
         Path contextRoot = resolveSourceRoot(extractDir);
-        String dockerfile = "DJANGO".equals(stack)
-                ? djangoDockerfile(runtimeVersion, internalPort)
-                : expressDockerfile(runtimeVersion, internalPort);
+        String dockerfile;
+        if ("DJANGO".equals(stack)) {
+            dockerfile = djangoDockerfile(runtimeVersion, internalPort);
+        } else if ("FASTAPI".equals(stack)) {
+            dockerfile = fastApiDockerfile(runtimeVersion, internalPort);
+        } else {
+            dockerfile = expressDockerfile(runtimeVersion, internalPort);
+        }
         Files.writeString(contextRoot.resolve("Dockerfile"), dockerfile);
         log.line(stack + " 표준 Dockerfile 생성 완료");
 
@@ -119,6 +124,18 @@ public class DockerBuildService {
                 RUN pip install --no-cache-dir -r requirements.txt
                 EXPOSE %d
                 CMD ["sh", "-c", "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:%d"]
+                """.formatted(version, internalPort, internalPort);
+    }
+
+    private String fastApiDockerfile(String runtimeVersion, int internalPort) {
+        String version = (runtimeVersion == null || runtimeVersion.isBlank()) ? "3.11" : runtimeVersion.trim();
+        return """
+                FROM python:%s-slim
+                WORKDIR /app
+                COPY . .
+                RUN pip install --no-cache-dir -r requirements.txt
+                EXPOSE %d
+                CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "%d"]
                 """.formatted(version, internalPort, internalPort);
     }
 
