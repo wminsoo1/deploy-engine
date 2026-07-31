@@ -18,8 +18,8 @@ import org.springframework.stereotype.Service;
 /**
  * 아티팩트를 컨테이너 이미지로 빌드해 각 워커(현재 E206)에 전달한다. 사용자는 Dockerfile을
  * 올리지 않는다 - 선택한 스택(언어+프레임워크)에 맞춰 플랫폼이 표준 Dockerfile을 자동 생성한다:
- *  - SPRING_JPA / SPRING_MYBATIS : .jar 산출물 하나 → 표준 Java 실행 Dockerfile
- *  - DJANGO / FASTAPI / EXPRESS  : 소스 zip(의존성 명세 포함) → 표준 Python/Node 빌드 Dockerfile
+ *  - SPRING_BOOT                      : .jar 산출물 하나 → 표준 Java 실행 Dockerfile
+ *  - DJANGO / FASTAPI / FLASK / EXPRESS : 소스 zip(의존성 명세 포함) → 표준 Python/Node 빌드 Dockerfile
  * 실제 docker build는 컨트롤 플레인(t3.small)이 아니라 빌드 호스트(E206)에서 SSH로 원격 수행한다.
  */
 @Service
@@ -46,7 +46,7 @@ public class DockerBuildService {
         Path localDir = Path.of(workDir);
         Files.createDirectories(localDir);
 
-        if ("DJANGO".equals(stack) || "FASTAPI".equals(stack) || "EXPRESS".equals(stack)) {
+        if ("DJANGO".equals(stack) || "FASTAPI".equals(stack) || "FLASK".equals(stack) || "EXPRESS".equals(stack)) {
             buildFromSourceZip(host, remoteDir, localDir, fileUrl, imageTag, stack, runtimeVersion, internalPort, log);
         } else {
             buildFromJar(host, remoteDir, localDir, fileUrl, imageTag, runtimeVersion, log);
@@ -97,6 +97,8 @@ public class DockerBuildService {
             dockerfile = djangoDockerfile(runtimeVersion, internalPort);
         } else if ("FASTAPI".equals(stack)) {
             dockerfile = fastApiDockerfile(runtimeVersion, internalPort);
+        } else if ("FLASK".equals(stack)) {
+            dockerfile = flaskDockerfile(runtimeVersion, internalPort);
         } else {
             dockerfile = expressDockerfile(runtimeVersion, internalPort);
         }
@@ -139,6 +141,22 @@ public class DockerBuildService {
                 """.formatted(version, internalPort, internalPort);
     }
 
+    /**
+     * Flask는 FastAPI와 달리 WSGI라 uvicorn(ASGI)이 아니라 gunicorn으로 띄운다. app.py에
+     * "app = Flask(__name__)"라는 흔한 관례(module:variable = app:app)를 그대로 가정한다.
+     */
+    private String flaskDockerfile(String runtimeVersion, int internalPort) {
+        String version = (runtimeVersion == null || runtimeVersion.isBlank()) ? "3.11" : runtimeVersion.trim();
+        return """
+                FROM python:%s-slim
+                WORKDIR /app
+                COPY . .
+                RUN pip install --no-cache-dir -r requirements.txt
+                EXPOSE %d
+                CMD ["gunicorn", "--bind", "0.0.0.0:%d", "app:app"]
+                """.formatted(version, internalPort, internalPort);
+    }
+
     private String expressDockerfile(String runtimeVersion, int internalPort) {
         String version = (runtimeVersion == null || runtimeVersion.isBlank()) ? "20" : runtimeVersion.trim();
         return """
@@ -161,76 +179,6 @@ public class DockerBuildService {
             }
         }
         return extractDir;
-    }
-
-    /**
-     * React/Vue/Angular/Svelte 프론트 소스(zip)를 받아, 빌드만 컨테이너 안에서 수행하고
-     * 정적 산출물(HTML/JS/CSS)만 로컬로 뽑아온다 - 앱처럼 계속 떠 있는 컨테이너가 아니라
-     * S3 정적 호스팅에 올릴 파일 묶음이 목적이라 buildImage()와는 결과물의 성격이 다르다.
-     * 네 프레임워크 전부 "npm install && npm run build" 관례를 그대로 따르고 dist/ 아래로
-     * 결과물을 내므로(Angular는 dist/{프로젝트명}/ 처럼 한 겹 더 들어갈 뿐) Dockerfile은 공통이다.
-     * 반환값은 정적 산출물이 담긴 로컬 디렉터리 - 호출하는 쪽(FrontendDeployService)이
-     * index.html 위치를 찾아 S3에 업로드한다.
-     */
-    public Path buildStaticSite(String workDir, String fileUrl, String imageTag, String runtimeVersion,
-                                 LogSink log) throws Exception {
-        String host = buildHost();
-        String remoteDir = "/tmp/" + Path.of(workDir).getFileName();
-        Path localDir = Path.of(workDir);
-        Files.createDirectories(localDir);
-
-        Path zipPath = localDir.resolve("frontend-source.zip");
-        download(fileUrl, zipPath);
-        log.line("프론트 소스(zip) 다운로드 완료: " + fileUrl);
-
-        Path extractDir = Files.createDirectories(localDir.resolve("ctx"));
-        unzip(zipPath, extractDir);
-        Path contextRoot = resolveSourceRoot(extractDir);
-
-        Files.writeString(contextRoot.resolve("Dockerfile"), frontendBuildDockerfile(runtimeVersion));
-        log.line("프론트 빌드용 Dockerfile 생성 완료");
-
-        runAndStream(log, null, "chmod", "-R", "+x", contextRoot.toString());
-
-        ssh(log, host, "rm -rf " + remoteDir);
-        runAndStream(log, null, "scp", "-r", "-i", sshKeyPath, "-o", "StrictHostKeyChecking=no",
-                contextRoot.toString(), "ubuntu@" + host + ":" + remoteDir);
-        ssh(log, host, "sudo docker build -t " + imageTag + " " + remoteDir);
-        log.line("프론트 빌드 완료: " + imageTag);
-
-        // 빌드용 이미지를 실제로 실행하지 않고, docker create(컨테이너를 시작하지 않고 만들기만
-        // 함)로 파일 시스템만 얻어서 docker cp로 결과물만 뽑아낸다. 그 뒤 컨테이너/이미지는
-        // 정리해서 빌드 호스트에 계속 쌓이지 않게 한다.
-        String containerName = imageTag.replace(":", "-").replace("/", "-") + "-extract";
-        String remoteExtractDir = "/tmp/" + containerName;
-        ssh(log, host, "sudo docker rm -f " + containerName + " >/dev/null 2>&1; "
-                + "sudo docker create --name " + containerName + " " + imageTag + " && "
-                + "sudo rm -rf " + remoteExtractDir + " && "
-                + "sudo docker cp " + containerName + ":/output " + remoteExtractDir + " && "
-                + "sudo docker rm " + containerName + " && sudo docker rmi " + imageTag);
-
-        Path localOutputParent = localDir.resolve("built");
-        Files.createDirectories(localOutputParent);
-        runAndStream(log, null, "scp", "-r", "-i", sshKeyPath, "-o", "StrictHostKeyChecking=no",
-                "ubuntu@" + host + ":" + remoteExtractDir, localOutputParent.toString());
-        ssh(log, host, "sudo rm -rf " + remoteExtractDir + " " + remoteDir);
-        log.line("정적 빌드 결과물 추출 완료");
-
-        return localOutputParent.resolve(containerName);
-    }
-
-    private String frontendBuildDockerfile(String runtimeVersion) {
-        String version = (runtimeVersion == null || runtimeVersion.isBlank()) ? "20" : runtimeVersion.trim();
-        return """
-                FROM node:%s-alpine AS build
-                WORKDIR /app
-                COPY . .
-                RUN npm install && npm run build
-
-                FROM alpine:3.20
-                COPY --from=build /app/dist /output
-                CMD ["true"]
-                """.formatted(version);
     }
 
     /** presigned URL에서 파일을 로컬로 내려받는다 - DB 초기화 SQL처럼 이미지 빌드와 무관한 다운로드에도 재사용. */

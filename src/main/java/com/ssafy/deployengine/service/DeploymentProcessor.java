@@ -200,14 +200,8 @@ public class DeploymentProcessor {
                     Artifact frontendArtifact = artifactRepository.findById(deployment.getFrontendArtifactId())
                             .orElseThrow(() -> new IllegalStateException(
                                     "존재하지 않는 frontendArtifactId: " + deployment.getFrontendArtifactId()));
-                    if (deployment.isFrontendPrebuilt()) {
-                        frontendDeployService.deployFrontend(
-                                frontendArtifact.getBucket(), frontendArtifact.getObjectKey(), appName, log);
-                    } else {
-                        String frontendFileUrl = resolveArtifactDownloadUrl(frontendArtifact);
-                        frontendDeployService.buildAndDeployFrontend(frontendFileUrl, appName,
-                                deployment.getFrontendRuntimeVersion(), log);
-                    }
+                    frontendDeployService.deployFrontend(
+                            frontendArtifact.getBucket(), frontendArtifact.getObjectKey(), appName, log);
                 } catch (Exception fe) {
                     log.line("프론트 배포 실패" + (hasBackend ? "(백엔드는 계속 진행): [" : ": [")
                             + fe.getClass().getSimpleName() + "] " + fe.getMessage());

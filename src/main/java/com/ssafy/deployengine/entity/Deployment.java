@@ -65,16 +65,6 @@ public class Deployment {
     @Column(name = "frontend_artifact_id")
     private Long frontendArtifactId;
 
-    // 프론트 프레임워크("REACT"/"VUE"/"ANGULAR"/"SVELTE"/"PLAIN"). PLAIN이거나 값이 없으면
-    // "이미 빌드된 정적 zip을 그대로 올린다"(과거 데이터 포함)로 간주해 Docker 빌드를 안 탄다.
-    @Column(name = "frontend_stack")
-    private String frontendStack;
-
-    // 프론트 빌드에 쓸 Node 버전. backend_artifact의 runtime_version과 별개 컬럼 - 백엔드/프론트가
-    // 같이 있는 분리형 배포에서 언어 자체가 다를 수 있어(예: 백엔드 Java, 프론트 Node) 공유할 수 없다.
-    @Column(name = "frontend_runtime_version")
-    private String frontendRuntimeVersion;
-
     @Column(name = "member_id")
     private Long memberId;
 
@@ -152,20 +142,6 @@ public class Deployment {
 
     public Long getFrontendArtifactId() {
         return frontendArtifactId;
-    }
-
-    /** PLAIN이거나 값이 없으면(과거 데이터 포함) "이미 빌드된 정적 zip"으로 간주한다. */
-    public String getEffectiveFrontendStack() {
-        return (frontendStack == null || frontendStack.isBlank()) ? "PLAIN" : frontendStack;
-    }
-
-    public boolean isFrontendPrebuilt() {
-        return "PLAIN".equals(getEffectiveFrontendStack());
-    }
-
-    public String getFrontendRuntimeVersion() {
-        return (frontendRuntimeVersion == null || frontendRuntimeVersion.isBlank())
-                ? "20" : frontendRuntimeVersion.trim();
     }
 
     public Long getMemberId() {

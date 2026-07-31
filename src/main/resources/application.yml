@@ -45,3 +45,9 @@ deploy:
     collect-interval-ms: ${METRICS_COLLECT_INTERVAL_MS:30000}
     retention-days: ${METRICS_RETENTION_DAYS:7}
     cleanup-cron: ${METRICS_CLEANUP_CRON:0 0 4 * * *}
+  # BUILDING/DEPLOYING에서 threshold-minutes 이상 멈춰있는 배포(deploy-engine 프로세스가
+  # 그 사이 죽은 경우 등)를 자동으로 재시도시키고, max-retries회를 소진하면 FAILED로 확정한다.
+  stale-recovery:
+    check-interval-ms: ${STALE_RECOVERY_CHECK_INTERVAL_MS:60000}
+    threshold-minutes: ${STALE_RECOVERY_THRESHOLD_MINUTES:10}
+    max-retries: ${STALE_RECOVERY_MAX_RETRIES:3}
