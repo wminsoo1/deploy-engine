@@ -32,7 +32,7 @@ public class Deployment {
     @Column(name = "runtime_version")
     private String runtimeVersion;
 
-    // 언어+프레임워크("SPRING_JPA"/"SPRING_MYBATIS"/"DJANGO"/"EXPRESS"). 이 값에 맞춰
+    // 언어+프레임워크("SPRING_BOOT"/"DJANGO"/"FASTAPI"/"EXPRESS"). 이 값에 맞춰
     // DockerBuildService가 Dockerfile을 자동 생성한다(사용자가 Dockerfile을 올리지 않음).
     @Column(name = "tech_stack")
     private String techStack;
@@ -101,9 +101,9 @@ public class Deployment {
         return (runtimeVersion == null || runtimeVersion.isBlank()) ? "17" : runtimeVersion.trim();
     }
 
-    /** 과거 데이터(techStack 컬럼이 없던 시절, .jar+JPA만 지원)는 SPRING_JPA로 간주한다. */
+    /** 과거 데이터(techStack 컬럼이 없던 시절, .jar만 지원)는 SPRING_BOOT로 간주한다. */
     public String getEffectiveTechStack() {
-        return (techStack == null || techStack.isBlank()) ? "SPRING_JPA" : techStack;
+        return (techStack == null || techStack.isBlank()) ? "SPRING_BOOT" : techStack;
     }
 
     public String getDatabaseName() {
