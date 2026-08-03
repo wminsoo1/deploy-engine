@@ -872,6 +872,33 @@ public class KubernetesDeployService {
     }
 
     /**
+     * 이 배포 전용 MySQL이 실제로 이 비밀번호를 받아주는지 확인한다. ensureMysql은 "이미 있으면
+     * 그대로 둔다" 방식이라, 같은 프로젝트를 삭제 없이 재배포하면서 비밀번호만 바꾸면 실제 MySQL은
+     * 예전 비밀번호 그대로인 채 앱만 새 비밀번호로 접속을 시도해 인증에 실패한다 - 이 경우 앱
+     * 컨테이너가 시작하자마자 죽어서 waitForRollout이 3분 타임아웃을 다 채운 뒤에야 크래시 로그
+     * 더미 속에서 원인을 찾아야 했다. 여기서 MySQL이 뜬 직후 미리 확인해서, 틀렸으면 몇 초 안에
+     * 명확한 이유로 바로 실패 처리할 수 있게 한다.
+     */
+    public boolean verifyMysqlCredentials(String namespace, String appName, String password)
+            throws IOException, InterruptedException {
+        String app = appName + "-mysql";
+        String podName = runKubectl(namespace, "get", "pods", "-l", "app=" + app,
+                "-o", "jsonpath={.items[0].metadata.name}").trim();
+        if (podName.isEmpty()) {
+            return false;
+        }
+        List<String> command = List.of("kubectl", "--kubeconfig", kubeconfigPath, "-n", namespace,
+                "exec", podName, "--", "mysql", "-uroot", "-p" + password, "-e", "SELECT 1");
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        try (var in = process.getInputStream()) {
+            in.readAllBytes();
+        }
+        return process.waitFor() == 0;
+    }
+
+    /**
      * MyBatis 등 자동 테이블 생성이 안 되는 프레임워크를 위해, 사용자가 올린 DB 초기화 SQL 파일을
      * 이 배포 전용 DB 파드({appName}-mysql) 안에서 한 번 실행한다(kubectl exec -i로 stdin에 SQL을 흘려보냄).
      */

@@ -138,6 +138,17 @@ public class DeploymentProcessor {
                     }
                     log.line("MySQL 준비 완료");
 
+                    // 같은 프로젝트를 삭제 없이 재배포하면서 비밀번호만 바꾸면, 이미 떠 있는 MySQL은
+                    // 예전 비밀번호 그대로라 앱이 새 비밀번호로 접속을 못 한다. 앱 컨테이너가 크래시
+                    // 루프를 돌며 3분 타임아웃을 다 채우기 전에, 여기서 미리 확인해서 몇 초 안에
+                    // 명확한 이유로 실패시킨다.
+                    if (!kubernetesDeployService.verifyMysqlCredentials(namespace, appName, dbPassword)) {
+                        throw new IllegalStateException(
+                                "MySQL 비밀번호가 올바르지 않습니다. 이 프로젝트의 DB는 처음 생성할 때 설정한 " +
+                                        "비밀번호로 고정되며, 재배포 시 비밀번호만 바꿔도 반영되지 않습니다. " +
+                                        "비밀번호를 바꾸려면 배포를 삭제한 뒤 다시 생성해주세요.");
+                    }
+
                     env.put("DB_HOST", mysqlHost);
                     env.put("DB_PORT", "3306");
                     env.put("DB_NAME", dbName);
