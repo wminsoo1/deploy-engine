@@ -60,9 +60,21 @@ public class FrontendDeployService {
     }
 
     private String uploadWebRoot(Path webRoot, String slug, LogSink log) throws IOException, InterruptedException {
+        // 같은 slug로 다른 프로젝트를 재배포하면(학번은 고정이라 slug가 항상 같음), 새 산출물에
+        // 없는 예전 파일이 그대로 남아있었다("index.html이 최신 자산을 가리키니 무해"라고 여겼지만,
+        // 실제로는 완전히 지운 게 아니라서 사용자가 혼란스러워했다) - 업로드 전에 기존 걸 먼저 지운다.
+        // ListBucket/DeleteObject 권한이 아직 없는 컨트롤 플레인 IAM 역할도 있을 수 있어서,
+        // 권한이 없으면 예전처럼 orphan 파일이 남는 정도로만 그치고 배포 자체는 계속 진행한다
+        // (권한이 추가되면 그때부터 자동으로 완전 삭제가 적용됨).
+        try {
+            log.line("기존 S3 파일 정리 중: s3://" + frontendBucket + "/" + slug + "/");
+            runAws(log, "s3", "rm", "s3://" + frontendBucket + "/" + slug + "/",
+                    "--recursive", "--region", region, "--only-show-errors");
+        } catch (IOException e) {
+            log.line("  기존 파일 정리 실패(권한 부족 가능, 무시하고 계속 진행): " + e.getMessage());
+        }
+
         // cp --recursive는 로컬 파일을 PutObject로 올리기만 하므로 PutObject 권한만 있으면 된다.
-        // (sync는 대상 비교에 ListBucket, --delete엔 DeleteObject가 필요해 권한을 더 요구한다.)
-        // 대신 이전 배포의 orphan 파일은 남는다(index.html이 최신 자산을 가리키므로 동작엔 무해).
         log.line("S3 정적 호스팅으로 업로드: s3://" + frontendBucket + "/" + slug + "/");
         runAws(log, "s3", "cp", webRoot.toString(), "s3://" + frontendBucket + "/" + slug + "/",
                 "--recursive", "--region", region, "--only-show-errors");
