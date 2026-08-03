@@ -780,10 +780,15 @@ public class KubernetesDeployService {
      * 없던 이전 버전의 Pod가 재시작 직후 찰나에 Ready로 카운트되는 식). 그래서
      * observedGeneration/updatedReplicas/replicas/availableReplicas를 모두 확인해서
      * "새 세대가 완전히 자리잡았는지"까지 확인한다.
+     *
+     * log가 주어지면(null 아니면) 15초마다 "OO초째 대기 중" 한 줄을 남긴다 - MySQL 준비나 앱
+     * 기동 대기처럼 몇십 초씩 걸리는 구간이 화면에 아무 진행 상황 없이 멈춰 보이지 않게.
      */
     public boolean waitForRollout(String namespace, String appName, int expectedReplicas,
-                                    int timeoutSeconds) throws ApiException, InterruptedException {
+                                    int timeoutSeconds, DockerBuildService.LogSink log)
+            throws ApiException, InterruptedException {
         int waited = 0;
+        int lastLoggedAt = 0;
         while (waited < timeoutSeconds) {
             V1Deployment d = appsApi.readNamespacedDeployment(appName, namespace).execute();
             Long generation = d.getMetadata() != null ? d.getMetadata().getGeneration() : null;
@@ -800,6 +805,10 @@ public class KubernetesDeployService {
                 if (generationCaughtUp && updatedEnough && noLeftoverOldPods && availableEnough) {
                     return true;
                 }
+            }
+            if (log != null && waited - lastLoggedAt >= 15) {
+                log.line("  ... 대기 중 (" + waited + "초 경과)");
+                lastLoggedAt = waited;
             }
             Thread.sleep(3000);
             waited += 3;

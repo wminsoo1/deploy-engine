@@ -132,7 +132,7 @@ public class DeploymentProcessor {
                     String mysqlHost = appName + "-mysql";
                     log.line("MySQL 준비 중 (db=" + dbName + ")");
                     kubernetesDeployService.ensureMysql(namespace, appName, dbName, dbPassword);
-                    boolean dbReady = kubernetesDeployService.waitForRollout(namespace, mysqlHost, 1, 120);
+                    boolean dbReady = kubernetesDeployService.waitForRollout(namespace, mysqlHost, 1, 120, log);
                     if (!dbReady) {
                         throw new IllegalStateException("MySQL이 제한시간 내에 준비되지 않음");
                     }
@@ -189,7 +189,7 @@ public class DeploymentProcessor {
                     String redisHost = appName + "-redis";
                     log.line("Redis 준비 중");
                     kubernetesDeployService.ensureRedis(namespace, appName);
-                    boolean redisReady = kubernetesDeployService.waitForRollout(namespace, redisHost, 1, 60);
+                    boolean redisReady = kubernetesDeployService.waitForRollout(namespace, redisHost, 1, 60, log);
                     if (!redisReady) {
                         throw new IllegalStateException("Redis가 제한시간 내에 준비되지 않음");
                     }
@@ -202,7 +202,7 @@ public class DeploymentProcessor {
                     String mongoHost = appName + "-mongo";
                     log.line("MongoDB 준비 중");
                     kubernetesDeployService.ensureMongo(namespace, appName);
-                    boolean mongoReady = kubernetesDeployService.waitForRollout(namespace, mongoHost, 1, 60);
+                    boolean mongoReady = kubernetesDeployService.waitForRollout(namespace, mongoHost, 1, 60, log);
                     if (!mongoReady) {
                         throw new IllegalStateException("MongoDB가 제한시간 내에 준비되지 않음");
                     }
@@ -251,7 +251,11 @@ public class DeploymentProcessor {
                 }
             }
 
-            boolean ready = !hasBackend || kubernetesDeployService.waitForRollout(namespace, appName, DEFAULT_REPLICAS, 180);
+            if (hasBackend) {
+                log.line("앱 기동 대기 중");
+            }
+            boolean ready = !hasBackend
+                    || kubernetesDeployService.waitForRollout(namespace, appName, DEFAULT_REPLICAS, 180, log);
 
             if (ready) {
                 log.line(hasBackend ? "모든 replica Ready 확인됨" : "프론트 배포 완료");
