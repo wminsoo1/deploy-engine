@@ -212,9 +212,14 @@ public class KubernetesDeployService {
         env.add(new V1EnvVar().name("MYSQL_ROOT_PASSWORD").value(password));
         if (databaseName != null && !databaseName.isBlank()) {
             env.add(new V1EnvVar().name("MYSQL_DATABASE").value(databaseName));
-            // 앱이 root가 아니라 자체 계정(흔히 db명과 같은 이름)을 쓰는 경우까지 커버
-            env.add(new V1EnvVar().name("MYSQL_USER").value(databaseName));
-            env.add(new V1EnvVar().name("MYSQL_PASSWORD").value(password));
+            // 앱이 root가 아니라 자체 계정(흔히 db명과 같은 이름)을 쓰는 경우까지 커버 - 단,
+            // 사용자가 DB 이름을 하필 "root"로 지었다면 이 계정 생성은 건너뛴다. mysql 공식
+            // 이미지 엔트리포인트가 MYSQL_USER=root를 명시적으로 거부해서(이미 MYSQL_ROOT_PASSWORD로
+            // root 계정은 따로 관리되므로) 컨테이너 자체가 못 뜬다.
+            if (!"root".equalsIgnoreCase(databaseName)) {
+                env.add(new V1EnvVar().name("MYSQL_USER").value(databaseName));
+                env.add(new V1EnvVar().name("MYSQL_PASSWORD").value(password));
+            }
         }
 
         // mysqld는 초기화가 끝나야 3306을 연다. TCP readiness로 "접속 가능"해질 때까지 기다리는 신호로 쓴다.
