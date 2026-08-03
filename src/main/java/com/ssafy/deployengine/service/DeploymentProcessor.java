@@ -72,6 +72,9 @@ public class DeploymentProcessor {
         // log.line()이 호출될 때마다 참조한다.
         StatusHolder currentStatus = new StatusHolder(DeploymentStatus.PENDING);
         DockerBuildService.LogSink log = message -> logService.append(id, message, currentStatus.value);
+        // 로컬(컨트롤 플레인)에 다운로드한 jar/zip/schema.sql 등이 쌓이는 작업 디렉터리 - try/catch
+        // 결과와 무관하게 finally에서 항상 지워야 해서 try 밖에서 미리 정해둔다.
+        String workDir = "/tmp/deploy-" + id;
 
         try {
             Member member = memberRepository.findById(deployment.getMemberId())
@@ -80,7 +83,6 @@ public class DeploymentProcessor {
             String namespace = com.ssafy.deployengine.support.Namespaces.toNamespace(member.getTeamName());
             String appName = deployment.getSlug();
             String imageTag = appName + ":" + id;
-            String workDir = "/tmp/deploy-" + id;
 
             boolean hasBackend = deployment.getBackendArtifactId() != null;
             boolean hasFrontend = deployment.getFrontendArtifactId() != null;
@@ -283,6 +285,31 @@ public class DeploymentProcessor {
             String reason = e.getMessage() != null ? e.getMessage() : "(메시지 없음)";
             currentStatus.value = DeploymentStatus.FAILED;
             log.line("배포 실패: [" + e.getClass().getSimpleName() + "] " + reason);
+        } finally {
+            // 성공/실패와 무관하게 항상 정리한다 - 안 하면 컨트롤 플레인의 작은 루트 디스크(7.6GB)에
+            // 배포할 때마다 다운로드한 jar/zip이 쌓여 결국 디스크가 꽉 찬다(실제로 겪은 장애 -
+            // "No space left on device"로 아티팩트 다운로드 자체가 실패하기 시작했었다).
+            deleteWorkDir(workDir, log);
+        }
+    }
+
+    private void deleteWorkDir(String workDir, DockerBuildService.LogSink log) {
+        try {
+            java.nio.file.Path dir = java.nio.file.Path.of(workDir);
+            if (!java.nio.file.Files.exists(dir)) {
+                return;
+            }
+            try (var walk = java.nio.file.Files.walk(dir)) {
+                walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                    try {
+                        java.nio.file.Files.deleteIfExists(p);
+                    } catch (java.io.IOException ignored) {
+                        // 정리 실패는 배포 결과에 영향을 주면 안 되므로 무시한다.
+                    }
+                });
+            }
+        } catch (Exception e) {
+            log.line("작업 디렉터리 정리 실패(무시됨): " + e.getMessage());
         }
     }
 
