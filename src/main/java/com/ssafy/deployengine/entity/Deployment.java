@@ -48,6 +48,24 @@ public class Deployment {
     @Column(name = "database_engine")
     private String databaseEngine;
 
+    // 사용자가 자기 앱이 기대하는 이름으로 DB 접속 정보 환경변수를 지정할 수 있다(예: 앱이
+    // DB_USERNAME이 아니라 DBUSER를 읽는 경우). 비어있으면 getEffectiveXxxEnvKey()가 플랫폼
+    // 기본 이름을 대신 돌려준다.
+    @Column(name = "db_host_env_key")
+    private String dbHostEnvKey;
+
+    @Column(name = "db_port_env_key")
+    private String dbPortEnvKey;
+
+    @Column(name = "db_name_env_key")
+    private String dbNameEnvKey;
+
+    @Column(name = "db_username_env_key")
+    private String dbUsernameEnvKey;
+
+    @Column(name = "db_password_env_key")
+    private String dbPasswordEnvKey;
+
     // DB 초기화(테이블 생성) SQL 아티팩트 id. 없으면 null(마이그레이션 불필요/JPA 자동생성 등).
     @Column(name = "schema_artifact_id")
     private Long schemaArtifactId;
@@ -114,6 +132,26 @@ public class Deployment {
             return null;
         }
         return (databaseEngine == null || databaseEngine.isBlank()) ? "MYSQL" : databaseEngine;
+    }
+
+    public String getEffectiveDbHostEnvKey() {
+        return (dbHostEnvKey == null || dbHostEnvKey.isBlank()) ? "DB_HOST" : dbHostEnvKey;
+    }
+
+    public String getEffectiveDbPortEnvKey() {
+        return (dbPortEnvKey == null || dbPortEnvKey.isBlank()) ? "DB_PORT" : dbPortEnvKey;
+    }
+
+    public String getEffectiveDbNameEnvKey() {
+        return (dbNameEnvKey == null || dbNameEnvKey.isBlank()) ? "DB_NAME" : dbNameEnvKey;
+    }
+
+    public String getEffectiveDbUsernameEnvKey() {
+        return (dbUsernameEnvKey == null || dbUsernameEnvKey.isBlank()) ? "DB_USERNAME" : dbUsernameEnvKey;
+    }
+
+    public String getEffectiveDbPasswordEnvKey() {
+        return (dbPasswordEnvKey == null || dbPasswordEnvKey.isBlank()) ? "DB_PASSWORD" : dbPasswordEnvKey;
     }
 
     public Long getSchemaArtifactId() {

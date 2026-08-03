@@ -151,15 +151,19 @@ public class DeploymentProcessor {
                                         "비밀번호를 바꾸려면 배포를 삭제한 뒤 다시 생성해주세요.");
                     }
 
-                    env.put("DB_HOST", mysqlHost);
-                    env.put("DB_PORT", "3306");
-                    env.put("DB_NAME", dbName);
-                    env.put("DB_USERNAME", DB_USERNAME);
+                    // 플랫폼 기본 이름(DB_HOST 등)을 그대로 쓰거나, 사용자가 자기 앱이 기대하는
+                    // 이름을 직접 지정했으면(dbHostEnvKey 등) 그 이름으로 주입한다 - 앱마다
+                    // 관례가 달라서(DB_USERNAME/DB_USER/DBUSER 등) 어떤 이름이든 결국 사용자가
+                    // 자기 앱에 맞게 지정하면 확실히 매칭된다.
+                    env.put(deployment.getEffectiveDbHostEnvKey(), mysqlHost);
+                    env.put(deployment.getEffectiveDbPortEnvKey(), "3306");
+                    env.put(deployment.getEffectiveDbNameEnvKey(), dbName);
+                    env.put(deployment.getEffectiveDbUsernameEnvKey(), DB_USERNAME);
                     // Node/Express+Sequelize 등 여러 생태계에서 DB_USERNAME 대신 DB_USER를 관례로
                     // 쓴다(실제로 Sequelize 프로젝트가 DB_USER만 읽어서 빈 사용자로 접속 시도하다
-                    // Access denied가 났다). 같은 값을 두 이름으로 같이 준다.
+                    // Access denied가 났다). 커스텀 이름을 지정 안 했으면 이 흔한 이름도 같이 준다.
                     env.put("DB_USER", DB_USERNAME);
-                    env.put("DB_PASSWORD", dbPassword);
+                    env.put(deployment.getEffectiveDbPasswordEnvKey(), dbPassword);
 
                     // DB_HOST 계열은 이 플랫폼만의 컨벤션이라, 로컬 개발용 application.yml에
                     // spring.datasource.*를 그대로 두고 컨테이너에서만 값을 바꾸려는 흔한 Spring
