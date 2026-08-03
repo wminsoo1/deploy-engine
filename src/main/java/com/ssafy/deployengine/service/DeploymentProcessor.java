@@ -110,6 +110,15 @@ public class DeploymentProcessor {
                 log.line("네임스페이스 준비: " + namespace);
 
                 Map<String, String> env = new HashMap<>();
+
+                // 서브도메인 프록시(SubdomainProxyFilter)가 X-Forwarded-Host/Proto를 실제 공개
+                // 주소로 채워서 넘겨줘도, Spring Boot는 이 설정이 켜져 있어야 그 헤더를 신뢰해서
+                // 리다이렉트/절대 URL을 "13.124.149.32" 같은 내부 주소가 아니라 진짜 공개 주소로
+                // 만든다. DB 사용 여부와 무관하게 모든 Spring Boot 배포에 적용한다.
+                if ("SPRING_BOOT".equals(deployment.getEffectiveTechStack())) {
+                    env.put("SERVER_FORWARD_HEADERS_STRATEGY", "framework");
+                }
+
                 String databaseEngine = deployment.getEffectiveDatabaseEngine();
                 if (databaseEngine != null) {
                     // 비밀번호는 백엔드가 AES-GCM으로 암호화(v1:)해 저장하므로 복호화해서 실제 값을 쓴다.
