@@ -257,6 +257,35 @@ public class DockerBuildService {
 
         String remoteDir = "/tmp/" + Path.of(workDir).getFileName();
         ssh(log, buildHost, "rm -rf " + remoteDir + " /tmp/image-transfer.tar");
+
+        cleanupOldImages(imageTag, log);
+    }
+
+    /**
+     * 재배포마다 appName(슬러그)은 그대로고 id만 바뀌어서(예: 1559989:6 → 1559989:7) 새로 태그된
+     * 이미지가 워커/빌드호스트에 계속 쌓인다 - 예전 태그는 다시 쓰이지 않는데도 디스크만 차지한다
+     * (실제로 겪은 디스크 부족의 한 원인). 이번에 새로 전달한 태그만 남기고, 같은 appName의
+     * 다른 태그는 지운다. 유지보수 성격이라 실패해도 배포 자체를 막으면 안 되므로 예외를 삼킨다.
+     */
+    private void cleanupOldImages(String imageTag, LogSink log) {
+        String appName = imageTag.substring(0, imageTag.lastIndexOf(':'));
+        String buildHost = buildHost();
+        for (String host : workerHostsCsv.split(",")) {
+            host = host.trim();
+            try {
+                if (host.equals(buildHost)) {
+                    ssh(log, host, "sudo sh -c 'docker images --format \"{{.Repository}}:{{.Tag}}\" "
+                            + "| grep -E \"^" + appName + ":[0-9]+$\" | grep -vx \"" + imageTag + "\" "
+                            + "| xargs -r docker rmi -f; docker builder prune -f --filter until=24h >/dev/null'");
+                }
+                ssh(log, host, "sudo sh -c 'k3s ctr images ls -q "
+                        + "| grep -E \"docker.io/library/" + appName + ":[0-9]+$\" "
+                        + "| grep -vx \"docker.io/library/" + imageTag + "\" "
+                        + "| xargs -r k3s ctr images rm'");
+            } catch (Exception e) {
+                log.line("  (예전 이미지 정리 실패 - 무시하고 계속 진행: " + e.getMessage() + ")");
+            }
+        }
     }
 
     private void ssh(LogSink log, String host, String remoteCommand) throws IOException, InterruptedException {
