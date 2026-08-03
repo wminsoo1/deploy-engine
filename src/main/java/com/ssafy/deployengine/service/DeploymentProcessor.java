@@ -132,6 +132,20 @@ public class DeploymentProcessor {
                     env.put("DB_USERNAME", DB_USERNAME);
                     env.put("DB_PASSWORD", dbPassword);
 
+                    // DB_HOST 계열은 이 플랫폼만의 컨벤션이라, 로컬 개발용 application.yml에
+                    // spring.datasource.*를 그대로 두고 컨테이너에서만 값을 바꾸려는 흔한 Spring
+                    // Boot 앱(예: url: ${SPRING_DATASOURCE_URL})은 이 값을 모르면 그대로 죽는다.
+                    // Spring Boot 표준 환경변수 이름(SPRING_DATASOURCE_URL 등 - relaxed binding으로
+                    // spring.datasource.*에 자동 매핑됨)도 같이 주입해서, 사용자가 이 플랫폼의
+                    // 컨벤션을 몰라도 동작하게 한다.
+                    if ("SPRING_BOOT".equals(deployment.getEffectiveTechStack())) {
+                        env.put("SPRING_DATASOURCE_URL", "jdbc:mysql://mysql:3306/" + dbName
+                                + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul"
+                                + "&characterEncoding=UTF-8");
+                        env.put("SPRING_DATASOURCE_USERNAME", DB_USERNAME);
+                        env.put("SPRING_DATASOURCE_PASSWORD", dbPassword);
+                    }
+
                     // MyBatis 등 자동 테이블 생성이 안 되는 프레임워크를 위한 선택적 DB 초기화 SQL.
                     if (deployment.getSchemaArtifactId() != null) {
                         log.line("DB 초기화 SQL 실행 중");
