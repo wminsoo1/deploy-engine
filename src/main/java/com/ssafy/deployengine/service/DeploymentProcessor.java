@@ -116,17 +116,20 @@ public class DeploymentProcessor {
                     String dbPassword = secretDecryptor.decrypt(deployment.getDatabasePassword());
                     String dbName = deployment.getDatabaseName();
 
-                    // 이 네임스페이스에 mysql이 없으면 만들고(도커 컴포즈로 db를 함께 띄우는 것과 비슷),
+                    // 이 배포 전용 MySQL이 없으면 만들고(도커 컴포즈로 db를 함께 띄우는 것과 비슷),
                     // 접속 가능해질 때까지 기다린 뒤 앱을 올려야 앱이 startup에서 DB 연결 실패로 죽지 않는다.
+                    // 팀(네임스페이스) 공유가 아니라 배포마다 독립된 인스턴스라 다른 사람/다른 프로젝트와
+                    // 비밀번호나 데이터가 섞이지 않는다.
+                    String mysqlHost = appName + "-mysql";
                     log.line("MySQL 준비 중 (db=" + dbName + ")");
-                    kubernetesDeployService.ensureMysql(namespace, dbName, dbPassword);
-                    boolean dbReady = kubernetesDeployService.waitForRollout(namespace, "mysql", 1, 120);
+                    kubernetesDeployService.ensureMysql(namespace, appName, dbName, dbPassword);
+                    boolean dbReady = kubernetesDeployService.waitForRollout(namespace, mysqlHost, 1, 120);
                     if (!dbReady) {
                         throw new IllegalStateException("MySQL이 제한시간 내에 준비되지 않음");
                     }
                     log.line("MySQL 준비 완료");
 
-                    env.put("DB_HOST", "mysql");
+                    env.put("DB_HOST", mysqlHost);
                     env.put("DB_PORT", "3306");
                     env.put("DB_NAME", dbName);
                     env.put("DB_USERNAME", DB_USERNAME);
@@ -139,7 +142,7 @@ public class DeploymentProcessor {
                     // spring.datasource.*에 자동 매핑됨)도 같이 주입해서, 사용자가 이 플랫폼의
                     // 컨벤션을 몰라도 동작하게 한다.
                     if ("SPRING_BOOT".equals(deployment.getEffectiveTechStack())) {
-                        env.put("SPRING_DATASOURCE_URL", "jdbc:mysql://mysql:3306/" + dbName
+                        env.put("SPRING_DATASOURCE_URL", "jdbc:mysql://" + mysqlHost + ":3306/" + dbName
                                 + "?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul"
                                 + "&characterEncoding=UTF-8");
                         env.put("SPRING_DATASOURCE_USERNAME", DB_USERNAME);
@@ -156,32 +159,35 @@ public class DeploymentProcessor {
                         java.nio.file.Path schemaFile = java.nio.file.Path.of(workDir, "schema.sql");
                         java.nio.file.Files.createDirectories(java.nio.file.Path.of(workDir));
                         dockerBuildService.downloadFile(schemaFileUrl, schemaFile);
-                        kubernetesDeployService.runSchemaSql(namespace, databaseEngine, dbName, dbPassword, schemaFile);
+                        kubernetesDeployService.runSchemaSql(
+                                namespace, appName, databaseEngine, dbName, dbPassword, schemaFile);
                         log.line("DB 초기화 SQL 실행 완료");
                     }
                 }
 
                 if (deployment.getNeededServices().contains("REDIS")) {
+                    String redisHost = appName + "-redis";
                     log.line("Redis 준비 중");
-                    kubernetesDeployService.ensureRedis(namespace);
-                    boolean redisReady = kubernetesDeployService.waitForRollout(namespace, "redis", 1, 60);
+                    kubernetesDeployService.ensureRedis(namespace, appName);
+                    boolean redisReady = kubernetesDeployService.waitForRollout(namespace, redisHost, 1, 60);
                     if (!redisReady) {
                         throw new IllegalStateException("Redis가 제한시간 내에 준비되지 않음");
                     }
                     log.line("Redis 준비 완료");
-                    env.put("REDIS_HOST", "redis");
+                    env.put("REDIS_HOST", redisHost);
                     env.put("REDIS_PORT", "6379");
                 }
 
                 if (deployment.getNeededServices().contains("MONGODB")) {
+                    String mongoHost = appName + "-mongo";
                     log.line("MongoDB 준비 중");
-                    kubernetesDeployService.ensureMongo(namespace);
-                    boolean mongoReady = kubernetesDeployService.waitForRollout(namespace, "mongo", 1, 60);
+                    kubernetesDeployService.ensureMongo(namespace, appName);
+                    boolean mongoReady = kubernetesDeployService.waitForRollout(namespace, mongoHost, 1, 60);
                     if (!mongoReady) {
                         throw new IllegalStateException("MongoDB가 제한시간 내에 준비되지 않음");
                     }
                     log.line("MongoDB 준비 완료");
-                    env.put("MONGO_HOST", "mongo");
+                    env.put("MONGO_HOST", mongoHost);
                     env.put("MONGO_PORT", "27017");
                 }
 

@@ -166,17 +166,21 @@ public class KubernetesDeployService {
     }
 
     /**
-     * needDatabase 배포를 위한 MySQL을 네임스페이스에 보장한다(없으면 생성). 도커 컴포즈로 app+db를
-     * 함께 띄우는 것과 비슷 - 같은 네임스페이스에 mysql Deployment + Service(이름 "mysql")를 만들어
-     * 앱(및 socat 사이드카)이 mysql:3306으로 붙게 한다.
-     * - 이미 있으면 그대로 둔다(멱등 - 기존 데이터/연결 보존)
+     * needDatabase 배포를 위한 MySQL을 이 배포(appName) 전용으로 보장한다(없으면 생성). 도커
+     * 컴포즈로 app+db를 함께 띄우는 것과 비슷 - "{appName}-mysql" Deployment + Service를 만들어
+     * 앱(및 socat 사이드카)이 그 이름:3306으로 붙게 한다. 예전엔 네임스페이스(팀)당 "mysql" 하나를
+     * 공유했는데, 그러면 같은 팀의 다른 배포/다른 사람이 다른 비밀번호로 배포해도 최초 생성 시점
+     * 비밀번호로 고정돼버려 "내가 입력한 비밀번호가 반영 안 됨" 문제가 생겼다. 이제는 배포마다
+     * 독립된 MySQL이라 그럴 일이 없다 - 대신 서로 DB를 공유하지도 않는다(요구사항).
+     * - 이미 있으면 그대로 둔다(멱등 - 같은 프로젝트를 재배포할 때 기존 데이터/연결 보존)
      * - mysql은 공개 이미지라 Docker Hub에서 pull(imagePullPolicy IfNotPresent) - 앱 이미지의 Never와 다름
      * - 저장은 emptyDir(파드 재시작 시 데이터 소실) - 우선 동작 우선, 영구화는 추후 PVC로
      * - root 및 databaseName과 같은 이름의 계정을 같은 비밀번호로 만든다
      *   (앱이 root 규약을 안 따르고 자체 계정을 쓰는 경우까지 커버)
      */
-    public void ensureMysql(String namespace, String databaseName, String password) throws ApiException {
-        String app = "mysql";
+    public void ensureMysql(String namespace, String appName, String databaseName, String password)
+            throws ApiException {
+        String app = appName + "-mysql";
         try {
             appsApi.readNamespacedDeployment(app, namespace).execute();
         } catch (ApiException e) {
@@ -246,13 +250,14 @@ public class KubernetesDeployService {
     }
 
     /**
-     * Redis가 필요한 배포를 위해 네임스페이스에 Redis를 보장한다(없으면 생성) - ensureMysql과 같은 패턴.
-     * 인증 없이(간단한 개발/데모 용도) "redis" Service(6379)로 붙게 한다.
+     * Redis가 필요한 배포를 위해 이 배포(appName) 전용 Redis를 보장한다(없으면 생성) - ensureMysql과
+     * 같은 패턴/같은 이유(팀 공유 대신 배포별 독립). 인증 없이(간단한 개발/데모 용도)
+     * "{appName}-redis" Service(6379)로 붙게 한다.
      * - 이미 있으면 그대로 둔다(멱등)
      * - 저장은 emptyDir(파드 재시작 시 데이터 소실) - 캐시/세션 용도라 mysql과 달리 영구성 요구가 낮음
      */
-    public void ensureRedis(String namespace) throws ApiException {
-        String app = "redis";
+    public void ensureRedis(String namespace, String appName) throws ApiException {
+        String app = appName + "-redis";
         try {
             appsApi.readNamespacedDeployment(app, namespace).execute();
         } catch (ApiException e) {
@@ -310,11 +315,11 @@ public class KubernetesDeployService {
     }
 
     /**
-     * MongoDB가 필요한 배포를 위해 네임스페이스에 Mongo를 보장한다 - ensureRedis와 같은 패턴.
-     * 인증 없이(간단한 개발/데모 용도) "mongo" Service(27017)로 붙게 한다.
+     * MongoDB가 필요한 배포를 위해 이 배포(appName) 전용 Mongo를 보장한다 - ensureRedis와 같은 패턴.
+     * 인증 없이(간단한 개발/데모 용도) "{appName}-mongo" Service(27017)로 붙게 한다.
      */
-    public void ensureMongo(String namespace) throws ApiException {
-        String app = "mongo";
+    public void ensureMongo(String namespace, String appName) throws ApiException {
+        String app = appName + "-mongo";
         try {
             appsApi.readNamespacedDeployment(app, namespace).execute();
         } catch (ApiException e) {
@@ -406,12 +411,13 @@ public class KubernetesDeployService {
 
         if (databaseEngine != null) {
             // DB_HOST 환경변수 컨벤션을 안 따르고 localhost로 하드코딩한 앱도 동작하도록,
-            // 같은 Pod 안에서 3306을 리스닝해 실제 mysql Service(3306)로 그대로 포워딩하는 사이드카.
-            // 같은 Pod의 컨테이너들은 네트워크 네임스페이스를 공유하므로 앱 입장에선 진짜 localhost:3306처럼 보인다.
+            // 같은 Pod 안에서 3306을 리스닝해 이 배포 전용 mysql Service(3306)로 그대로 포워딩하는
+            // 사이드카. 같은 Pod의 컨테이너들은 네트워크 네임스페이스를 공유하므로 앱 입장에선
+            // 진짜 localhost:3306처럼 보인다.
             V1Container dbProxy = new V1Container()
                     .name("db-proxy")
                     .image("alpine/socat")
-                    .args(List.of("TCP-LISTEN:3306,fork,reuseaddr", "TCP:mysql:3306"));
+                    .args(List.of("TCP-LISTEN:3306,fork,reuseaddr", "TCP:" + appName + "-mysql:3306"));
             containers.add(dbProxy);
         }
 
@@ -465,6 +471,8 @@ public class KubernetesDeployService {
      * 한 배포에 속한 리소스 전부를 정리한다(apply의 역순): Deployment -> Service -> Ingress -> Middleware.
      * 이미 없는 건 404를 무시(멱등)한다. Deployment를 지우면 그에 속한 파드는 어느 노드에 떠 있든
      * 클러스터 전체에서 함께 사라지므로, 삭제도 노드 대수와 무관하다.
+     * mysql/redis/mongo는 이제 이 배포 전용(다른 배포와 공유 안 함)이라 같이 지운다 - 안 그러면
+     * 재배포 시 예전 비밀번호가 남아있는 채로 새 비밀번호와 안 맞는 문제가 생긴다.
      * 네임스페이스/ResourceQuota/NetworkPolicy는 팀 공용이라 여기서 지우지 않는다.
      */
     public void deleteAppResources(String namespace, String appName) throws ApiException {
@@ -480,8 +488,12 @@ public class KubernetesDeployService {
                 "traefik.io", "v1alpha1", namespace, "ingressroutes", hostRouteName).execute());
         deleteIfExists(() -> customObjectsApi.deleteNamespacedCustomObject(
                 "traefik.io", "v1alpha1", namespace, "middlewares", addPrefixName).execute());
-        // frontend-s3(ExternalName Service)와 frontend-s3-host-rewrite(Middleware)는 네임스페이스
-        // 공용 리소스라(mysql/redis/mongo와 같은 취급) 여기서 안 지운다.
+        for (String suffix : List.of("-mysql", "-redis", "-mongo")) {
+            deleteIfExists(() -> appsApi.deleteNamespacedDeployment(appName + suffix, namespace).execute());
+            deleteIfExists(() -> coreApi.deleteNamespacedService(appName + suffix, namespace).execute());
+        }
+        // frontend-s3(ExternalName Service)/frontend-s3-host-rewrite(Middleware)는 정말로 여러
+        // 배포가 함께 쓰는 네임스페이스 공용 리소스라 여기서 안 지운다.
     }
 
     @FunctionalInterface
@@ -856,11 +868,11 @@ public class KubernetesDeployService {
 
     /**
      * MyBatis 등 자동 테이블 생성이 안 되는 프레임워크를 위해, 사용자가 올린 DB 초기화 SQL 파일을
-     * DB 파드(mysql) 안에서 한 번 실행한다(kubectl exec -i로 stdin에 SQL을 흘려보냄).
+     * 이 배포 전용 DB 파드({appName}-mysql) 안에서 한 번 실행한다(kubectl exec -i로 stdin에 SQL을 흘려보냄).
      */
-    public String runSchemaSql(String namespace, String engine, String databaseName, String password,
-                                java.nio.file.Path sqlFile) throws IOException, InterruptedException {
-        String app = "mysql";
+    public String runSchemaSql(String namespace, String appName, String engine, String databaseName,
+                                String password, java.nio.file.Path sqlFile) throws IOException, InterruptedException {
+        String app = appName + "-mysql";
         String podName = runKubectl(namespace, "get", "pods", "-l", "app=" + app,
                 "-o", "jsonpath={.items[0].metadata.name}").trim();
         if (podName.isEmpty()) {
