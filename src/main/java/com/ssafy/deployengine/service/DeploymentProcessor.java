@@ -155,6 +155,10 @@ public class DeploymentProcessor {
                     env.put("DB_PORT", "3306");
                     env.put("DB_NAME", dbName);
                     env.put("DB_USERNAME", DB_USERNAME);
+                    // Node/Express+Sequelize 등 여러 생태계에서 DB_USERNAME 대신 DB_USER를 관례로
+                    // 쓴다(실제로 Sequelize 프로젝트가 DB_USER만 읽어서 빈 사용자로 접속 시도하다
+                    // Access denied가 났다). 같은 값을 두 이름으로 같이 준다.
+                    env.put("DB_USER", DB_USERNAME);
                     env.put("DB_PASSWORD", dbPassword);
 
                     // DB_HOST 계열은 이 플랫폼만의 컨벤션이라, 로컬 개발용 application.yml에

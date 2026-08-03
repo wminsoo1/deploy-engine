@@ -783,6 +783,11 @@ public class KubernetesDeployService {
      *
      * log가 주어지면(null 아니면) 15초마다 "OO초째 대기 중" 한 줄을 남긴다 - MySQL 준비나 앱
      * 기동 대기처럼 몇십 초씩 걸리는 구간이 화면에 아무 진행 상황 없이 멈춰 보이지 않게.
+     *
+     * 컨테이너가 크래시 루프 중이면(예: 환경변수 이름이 안 맞아 DB 연결 자체를 못 하는 경우)
+     * 타임아웃을 다 기다리지 않고 조기에 실패 처리한다 - 안 그러면 몇 초 만에 죽는 앱도
+     * 최대 timeoutSeconds(보통 180초) 내내 "대기 중"만 찍히다가 그제서야 진단 로그가 나와서,
+     * 실제로는 금방 알 수 있는 오류를 사용자가 3분씩 기다려야 알게 된다(실제로 겪음).
      */
     public boolean waitForRollout(String namespace, String appName, int expectedReplicas,
                                     int timeoutSeconds, DockerBuildService.LogSink log)
@@ -806,12 +811,44 @@ public class KubernetesDeployService {
                     return true;
                 }
             }
+            if (isCrashLooping(namespace, appName)) {
+                if (log != null) {
+                    log.line("  컨테이너가 반복적으로 재시작하고 있어 대기를 중단하고 실패 처리합니다.");
+                }
+                return false;
+            }
             if (log != null && waited - lastLoggedAt >= 15) {
                 log.line("  ... 대기 중 (" + waited + "초 경과)");
                 lastLoggedAt = waited;
             }
             Thread.sleep(3000);
             waited += 3;
+        }
+        return false;
+    }
+
+    /**
+     * appName 라벨의 Pod 중 하나라도 같은 이름의 컨테이너가 2번 이상 재시작했으면 크래시 루프로
+     * 판단한다. client-java로 구조화된 Pod 상태를 읽으면 k3s의 최신 API 필드 때문에 파싱이 깨질
+     * 수 있어(fetchPodFailureLogs와 같은 이유), kubectl을 셸아웃해서 문자열로만 필요한 값을 얻는다.
+     * 이 조기 감지 자체가 실패해도 원래 타임아웃 로직으로 그대로 폴백해야 하므로 예외를 삼킨다.
+     */
+    private boolean isCrashLooping(String namespace, String appName) {
+        try {
+            String podNames = runKubectl(namespace, "get", "pods", "-l", "app=" + appName,
+                    "-o", "jsonpath={.items[*].metadata.name}").trim();
+            if (podNames.isEmpty()) {
+                return false;
+            }
+            for (String podName : podNames.split("\\s+")) {
+                String restartCount = runKubectl(namespace, "get", "pod", podName, "-o",
+                        "jsonpath={.status.containerStatuses[?(@.name=='" + appName + "')].restartCount}").trim();
+                if (!restartCount.isEmpty() && Integer.parseInt(restartCount) >= 2) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            // 조기 감지 실패는 무시하고 기존 타임아웃 로직으로 진행한다.
         }
         return false;
     }
