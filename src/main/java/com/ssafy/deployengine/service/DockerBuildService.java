@@ -313,7 +313,10 @@ public class DockerBuildService {
         }
         int exitCode = process.waitFor();
         if (exitCode != 0) {
-            throw new IllegalStateException("명령 실패(exit=" + exitCode + "): " + String.join(" ", command));
+            // 실제 실패 원인(pip/npm 에러 등)은 이미 위에서 한 줄씩 스트리밍됐으므로 여기서 반복하지
+            // 않는다. SSH 키 경로·워커 호스트명·내부 작업 디렉터리 같은 내부 정보를 사용자에게
+            // 보여줄 필요도 없어 원래 명령 전체를 그대로 남기던 걸 exit 코드만으로 줄였다.
+            throw new IllegalStateException(command[0] + " 명령 실패(exit=" + exitCode + ")");
         }
     }
 
