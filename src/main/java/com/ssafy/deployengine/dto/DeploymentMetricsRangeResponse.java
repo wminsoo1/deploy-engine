@@ -11,7 +11,6 @@ public record DeploymentMetricsRangeResponse(
         List<MetricPoint> memoryBytes,
         List<MetricPoint> networkReceiveBytes,
         List<MetricPoint> networkTransmitBytes,
-        List<MetricPoint> diskUsageBytes,
         List<MetricPoint> requestsTotal
 ) {
     /** epochSeconds = Prometheus 샘플 타임스탬프(초 단위 유닉스 시간), value = 그 시점의 값. */

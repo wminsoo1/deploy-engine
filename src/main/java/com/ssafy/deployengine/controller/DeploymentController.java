@@ -119,7 +119,7 @@ public class DeploymentController {
         return ResponseEntity.ok(runtimeLogService.getRecentLogs(target.namespace(), target.appName(), lines));
     }
 
-    // Prometheus 폴링 방식 - 호출 시점의 CPU/메모리/네트워크/디스크/요청수 스냅샷.
+    // Prometheus 폴링 방식 - 호출 시점의 CPU/메모리/네트워크/요청수 스냅샷.
     // 과거 추이(그래프)는 아래 /metrics/range 에서.
     @GetMapping("/api/deployments/{id}/metrics")
     public ResponseEntity<DeploymentMetricsResponse> metrics(@PathVariable Long id) {

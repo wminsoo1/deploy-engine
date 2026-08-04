@@ -17,7 +17,7 @@ import com.ssafy.deployengine.dto.DeploymentMetricsResponse;
 
 /**
  * Prometheus(E206, NetworkPolicy로 컨트롤 플레인 IP만 허용)에 PromQL로 물어봐서
- * CPU/메모리/네트워크/디스크(cAdvisor)와 요청수(Traefik)를 가져온다.
+ * CPU/메모리/네트워크(cAdvisor)와 요청수(Traefik)를 가져온다.
  * - getMetrics: /api/v1/query    → "현재 값" 스냅샷 하나
  * - getMetricsRange: /api/v1/query_range → 구간 내 시계열(그래프용)
  * 두 경로가 같은 PromQL을 쓰도록 쿼리 문자열은 아래 *Query() 메서드로 한 곳에서 만든다.
@@ -37,7 +37,6 @@ public class MetricsService {
                 queryScalarAsLong(memoryQuery(namespace, appName)),
                 queryScalarAsLong(netRxQuery(namespace, appName)),
                 queryScalarAsLong(netTxQuery(namespace, appName)),
-                queryScalarAsLong(diskQuery(namespace, appName)),
                 queryScalarAsLong(requestsQuery(namespace, appName, port)));
     }
 
@@ -54,7 +53,6 @@ public class MetricsService {
                 queryRange(memoryQuery(namespace, appName), start, end, stepSeconds),
                 queryRange(netRxQuery(namespace, appName), start, end, stepSeconds),
                 queryRange(netTxQuery(namespace, appName), start, end, stepSeconds),
-                queryRange(diskQuery(namespace, appName), start, end, stepSeconds),
                 queryRange(requestsQuery(namespace, appName, port), start, end, stepSeconds));
     }
 
@@ -88,12 +86,6 @@ public class MetricsService {
         return String.format(
                 "sum(container_network_transmit_bytes_total{namespace=\"%s\",pod=~\"%s\"})",
                 namespace, podRegex(appName));
-    }
-
-    private String diskQuery(String namespace, String appName) {
-        return String.format(
-                "sum(container_fs_usage_bytes{namespace=\"%s\",pod=~\"%s\",container=\"%s\"})",
-                namespace, podRegex(appName), appName);
     }
 
     private String requestsQuery(String namespace, String appName, int port) {

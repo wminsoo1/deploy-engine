@@ -6,7 +6,6 @@ public record DeploymentMetricsResponse(
         Long memoryBytes,
         Long networkReceiveBytes,
         Long networkTransmitBytes,
-        Long diskUsageBytes,
         Long requestsTotal
 ) {
 }

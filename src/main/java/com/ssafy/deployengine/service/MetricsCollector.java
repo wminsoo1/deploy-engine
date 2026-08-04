@@ -60,7 +60,7 @@ public class MetricsCollector {
                 }
                 metricRepository.save(new DeploymentMetric(deployment.getId(),
                         m.cpuCores(), m.memoryBytes(), m.networkReceiveBytes(),
-                        m.networkTransmitBytes(), m.diskUsageBytes(), m.requestsTotal()));
+                        m.networkTransmitBytes(), m.requestsTotal()));
             } catch (Exception e) {
                 // 한 배포 수집 실패가 나머지 수집을 막지 않도록 개별적으로 잡는다.
                 log.warn("메트릭 수집 실패 (deploymentId={}): {}", deployment.getId(), e.getMessage());
@@ -71,7 +71,7 @@ public class MetricsCollector {
     private static boolean isAllNull(DeploymentMetricsResponse m) {
         return m.cpuCores() == null && m.memoryBytes() == null
                 && m.networkReceiveBytes() == null && m.networkTransmitBytes() == null
-                && m.diskUsageBytes() == null && m.requestsTotal() == null;
+                && m.requestsTotal() == null;
     }
 
     // 매일 새벽 4시에 retentionDays보다 오래된 이력 삭제. 표현식은 설정으로 덮어쓸 수 있음.
